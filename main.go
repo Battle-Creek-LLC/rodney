@@ -2346,9 +2346,341 @@ func formatDiscoverText(entries []discoverEntry, attrName, pageURL string) strin
 	return buf.String()
 }
 
+// discoverFormEntry represents a single form field found by --forms mode.
+type discoverFormEntry struct {
+	FormSelector string `json:"form_selector"`
+	FormAction   string `json:"form_action,omitempty"`
+	Selector     string `json:"selector"`
+	Tag          string `json:"tag"`
+	Type         string `json:"type,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Label        string `json:"label,omitempty"`
+	Command      string `json:"command"`
+}
+
+// queryDiscoverForms finds all forms and their fields, returning structured entries.
+func queryDiscoverForms(page *rod.Page) ([]discoverFormEntry, error) {
+	js := `() => {
+		var results = [];
+		var forms = document.querySelectorAll('form');
+		forms.forEach(function(form, fi) {
+			var formSel = '';
+			if (form.id) formSel = 'form#' + form.id;
+			else if (form.name) formSel = 'form[name="' + form.name + '"]';
+			else if (fi === 0 && forms.length === 1) formSel = 'form';
+			else formSel = 'form:nth-of-type(' + (fi+1) + ')';
+			var formAction = form.getAttribute('action') || '';
+
+			var fields = form.querySelectorAll('input, select, textarea, button');
+			fields.forEach(function(el) {
+				var tag = el.tagName.toLowerCase();
+				var type = el.getAttribute('type') || '';
+				var name = el.getAttribute('name') || '';
+				var id = el.id || '';
+				var label = '';
+
+				// Try to find associated label
+				if (id) {
+					var lbl = document.querySelector('label[for="' + id + '"]');
+					if (lbl) label = lbl.textContent.trim();
+				}
+				if (!label && el.getAttribute('aria-label')) {
+					label = el.getAttribute('aria-label');
+				}
+				if (!label && el.placeholder) {
+					label = el.placeholder;
+				}
+				if (!label && tag === 'button') {
+					label = el.textContent.trim();
+				}
+
+				// Build best selector
+				var sel = '';
+				if (id) sel = '#' + id;
+				else if (name) sel = tag + '[name="' + name + '"]';
+				else if (type === 'submit' || tag === 'button') sel = tag + '[type="submit"]';
+				else sel = tag;
+
+				// Determine command
+				var cmd = '';
+				if (tag === 'select') {
+					cmd = 'rodney select "' + sel + '" "TODO"';
+				} else if (tag === 'textarea' || (tag === 'input' && type !== 'submit' && type !== 'button' && type !== 'file')) {
+					cmd = 'rodney input "' + sel + '" "TODO"';
+				} else if (type === 'file') {
+					cmd = 'rodney file "' + sel + '" "TODO"';
+				} else if (tag === 'button' || type === 'submit' || type === 'button') {
+					cmd = 'rodney click "' + sel + '"';
+				}
+
+				results.push({
+					form_selector: formSel,
+					form_action: formAction,
+					selector: sel,
+					tag: tag,
+					type: type,
+					name: name,
+					label: label,
+					command: cmd
+				});
+			});
+		});
+		return results;
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		return nil, fmt.Errorf("discover forms eval failed: %w", err)
+	}
+
+	raw := result.Value.JSON("", "")
+	var entries []discoverFormEntry
+	if jsonErr := json.Unmarshal([]byte(raw), &entries); jsonErr != nil {
+		return nil, fmt.Errorf("failed to parse form results: %w", jsonErr)
+	}
+	return entries, nil
+}
+
+// formatDiscoverFormsText formats form entries as human-readable output.
+func formatDiscoverFormsText(entries []discoverFormEntry) string {
+	var buf strings.Builder
+	currentForm := ""
+	for _, e := range entries {
+		if e.FormSelector != currentForm {
+			if currentForm != "" {
+				fmt.Fprintln(&buf)
+			}
+			currentForm = e.FormSelector
+			header := fmt.Sprintf("Form: %s", e.FormSelector)
+			if e.FormAction != "" {
+				header += fmt.Sprintf(" (action=%q)", e.FormAction)
+			}
+			fmt.Fprintln(&buf, header)
+		}
+		comment := ""
+		if e.Label != "" {
+			comment = "# " + e.Label
+		}
+		if e.Type != "" && comment == "" {
+			comment = "# (type=" + e.Type + ")"
+		} else if e.Type != "" {
+			comment += " (type=" + e.Type + ")"
+		}
+		if comment != "" {
+			fmt.Fprintf(&buf, "  %-50s %s\n", e.Command, comment)
+		} else {
+			fmt.Fprintf(&buf, "  %s\n", e.Command)
+		}
+	}
+	return buf.String()
+}
+
+// discoverLinkEntry represents a single link found by --links mode.
+type discoverLinkEntry struct {
+	Selector string `json:"selector"`
+	Href     string `json:"href"`
+	Text     string `json:"text"`
+	Command  string `json:"command"`
+}
+
+// queryDiscoverLinks finds all anchor elements with href attributes.
+func queryDiscoverLinks(page *rod.Page) ([]discoverLinkEntry, error) {
+	js := `() => {
+		var results = [];
+		var links = document.querySelectorAll('a[href]');
+		links.forEach(function(el) {
+			var href = el.getAttribute('href') || '';
+			var text = el.textContent.trim().substring(0, 60);
+			var id = el.id || '';
+
+			// Build best selector
+			var sel = '';
+			if (id) sel = 'a#' + id;
+			else if (href) sel = 'a[href="' + href.replace(/"/g, '\\"') + '"]';
+			else sel = 'a';
+
+			results.push({
+				selector: sel,
+				href: href,
+				text: text,
+				command: 'rodney click "' + sel + '"'
+			});
+		});
+		return results;
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		return nil, fmt.Errorf("discover links eval failed: %w", err)
+	}
+
+	raw := result.Value.JSON("", "")
+	var entries []discoverLinkEntry
+	if jsonErr := json.Unmarshal([]byte(raw), &entries); jsonErr != nil {
+		return nil, fmt.Errorf("failed to parse link results: %w", jsonErr)
+	}
+	return entries, nil
+}
+
+// formatDiscoverLinksText formats link entries as human-readable output.
+func formatDiscoverLinksText(entries []discoverLinkEntry, pageURL string) string {
+	var buf strings.Builder
+	if pageURL != "" {
+		fmt.Fprintf(&buf, "Links on %s:\n", pageURL)
+	} else {
+		fmt.Fprintln(&buf, "Links:")
+	}
+	for _, e := range entries {
+		comment := ""
+		if e.Text != "" {
+			comment = "# " + e.Text
+		}
+		if comment != "" {
+			fmt.Fprintf(&buf, "  %-50s %s\n", e.Command, comment)
+		} else {
+			fmt.Fprintf(&buf, "  %s\n", e.Command)
+		}
+	}
+	return buf.String()
+}
+
+// discoverInteractiveEntry represents an interactive element found by --interactive mode.
+type discoverInteractiveEntry struct {
+	Selector string `json:"selector"`
+	Tag      string `json:"tag"`
+	Type     string `json:"type,omitempty"`
+	Role     string `json:"role,omitempty"`
+	Text     string `json:"text"`
+	Command  string `json:"command"`
+}
+
+// queryDiscoverInteractive finds all interactive/focusable elements on the page.
+func queryDiscoverInteractive(page *rod.Page) ([]discoverInteractiveEntry, error) {
+	js := `() => {
+		var results = [];
+		var seen = new Set();
+		var els = document.querySelectorAll('button, a[href], input, select, textarea, [role="button"], [tabindex]');
+		els.forEach(function(el) {
+			// Deduplicate by element reference
+			if (seen.has(el)) return;
+			seen.add(el);
+
+			var tag = el.tagName.toLowerCase();
+			var type = el.getAttribute('type') || '';
+			var role = el.getAttribute('role') || '';
+			var id = el.id || '';
+			var name = el.getAttribute('name') || '';
+			var text = '';
+
+			// Get descriptive text
+			if (el.getAttribute('aria-label')) {
+				text = el.getAttribute('aria-label');
+			} else if (tag === 'input' || tag === 'textarea') {
+				// Find associated label
+				if (id) {
+					var lbl = document.querySelector('label[for="' + id + '"]');
+					if (lbl) text = lbl.textContent.trim();
+				}
+				if (!text) text = el.placeholder || '';
+			} else {
+				text = el.textContent.trim().substring(0, 60);
+			}
+
+			// Build best selector
+			var sel = '';
+			if (id) sel = tag + '#' + id;
+			else if (name) sel = tag + '[name="' + name + '"]';
+			else if (tag === 'a') {
+				var href = el.getAttribute('href');
+				if (href) sel = 'a[href="' + href.replace(/"/g, '\\"') + '"]';
+				else sel = 'a';
+			} else if (role) {
+				sel = '[role="' + role + '"]';
+			} else {
+				sel = tag;
+			}
+
+			// Determine command
+			var cmd = '';
+			if (tag === 'select') {
+				cmd = 'rodney select "' + sel + '" "TODO"';
+			} else if (tag === 'input' && type === 'file') {
+				cmd = 'rodney file "' + sel + '" "TODO"';
+			} else if (tag === 'input' || tag === 'textarea') {
+				cmd = 'rodney input "' + sel + '" "TODO"';
+			} else {
+				cmd = 'rodney click "' + sel + '"';
+			}
+
+			// Determine effective role for display
+			var effectiveRole = role;
+			if (!effectiveRole) {
+				if (tag === 'button') effectiveRole = 'button';
+				else if (tag === 'a') effectiveRole = 'link';
+				else if (tag === 'input' && (type === 'text' || type === '' || type === 'email' || type === 'password' || type === 'search' || type === 'tel' || type === 'url' || type === 'number')) effectiveRole = 'textbox';
+				else if (tag === 'input' && type === 'checkbox') effectiveRole = 'checkbox';
+				else if (tag === 'input' && type === 'radio') effectiveRole = 'radio';
+				else if (tag === 'input' && type === 'file') effectiveRole = 'file';
+				else if (tag === 'textarea') effectiveRole = 'textbox';
+				else if (tag === 'select') effectiveRole = 'combobox';
+			}
+
+			results.push({
+				selector: sel,
+				tag: tag,
+				type: type,
+				role: effectiveRole,
+				text: text,
+				command: cmd
+			});
+		});
+		return results;
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		return nil, fmt.Errorf("discover interactive eval failed: %w", err)
+	}
+
+	raw := result.Value.JSON("", "")
+	var entries []discoverInteractiveEntry
+	if jsonErr := json.Unmarshal([]byte(raw), &entries); jsonErr != nil {
+		return nil, fmt.Errorf("failed to parse interactive results: %w", jsonErr)
+	}
+	return entries, nil
+}
+
+// formatDiscoverInteractiveText formats interactive entries as human-readable output.
+func formatDiscoverInteractiveText(entries []discoverInteractiveEntry) string {
+	var buf strings.Builder
+	fmt.Fprintln(&buf, "Interactive elements:")
+	for _, e := range entries {
+		comment := ""
+		if e.Text != "" {
+			comment = "# " + e.Text
+		}
+		if e.Role != "" {
+			if comment != "" {
+				comment += " (" + e.Role + ")"
+			} else {
+				comment = "# (" + e.Role + ")"
+			}
+		}
+		if comment != "" {
+			fmt.Fprintf(&buf, "  %-50s %s\n", e.Command, comment)
+		} else {
+			fmt.Fprintf(&buf, "  %s\n", e.Command)
+		}
+	}
+	return buf.String()
+}
+
 func cmdDiscover(args []string) {
 	jsonOutput := false
 	attrName := "data-testid"
+	modeForms := false
+	modeLinks := false
+	modeInteractive := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--json":
@@ -2359,28 +2691,86 @@ func cmdDiscover(args []string) {
 			}
 			i++
 			attrName = args[i]
+		case "--forms":
+			modeForms = true
+		case "--links":
+			modeLinks = true
+		case "--interactive":
+			modeInteractive = true
 		}
+	}
+
+	// Check mutual exclusivity of modes
+	modeCount := 0
+	if modeForms {
+		modeCount++
+	}
+	if modeLinks {
+		modeCount++
+	}
+	if modeInteractive {
+		modeCount++
+	}
+	if modeCount > 1 {
+		fatal("--forms, --links, and --interactive are mutually exclusive")
 	}
 
 	_, _, page := withPage()
 	info, _ := page.Info()
-
-	entries, err := queryDiscoverEntries(page, attrName)
-	if err != nil {
-		fatal("%v", err)
-	}
-
-	if jsonOutput {
-		out, _ := json.MarshalIndent(entries, "", "  ")
-		fmt.Println(string(out))
-		return
-	}
-
-	url := ""
+	pageURL := ""
 	if info != nil {
-		url = info.URL
+		pageURL = info.URL
 	}
-	fmt.Print(formatDiscoverText(entries, attrName, url))
+
+	switch {
+	case modeForms:
+		entries, err := queryDiscoverForms(page)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if jsonOutput {
+			out, _ := json.MarshalIndent(entries, "", "  ")
+			fmt.Println(string(out))
+			return
+		}
+		fmt.Print(formatDiscoverFormsText(entries))
+
+	case modeLinks:
+		entries, err := queryDiscoverLinks(page)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if jsonOutput {
+			out, _ := json.MarshalIndent(entries, "", "  ")
+			fmt.Println(string(out))
+			return
+		}
+		fmt.Print(formatDiscoverLinksText(entries, pageURL))
+
+	case modeInteractive:
+		entries, err := queryDiscoverInteractive(page)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if jsonOutput {
+			out, _ := json.MarshalIndent(entries, "", "  ")
+			fmt.Println(string(out))
+			return
+		}
+		fmt.Print(formatDiscoverInteractiveText(entries))
+
+	default:
+		entries, err := queryDiscoverEntries(page, attrName)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if jsonOutput {
+			out, _ := json.MarshalIndent(entries, "", "  ")
+			fmt.Println(string(out))
+			return
+		}
+		fmt.Print(formatDiscoverText(entries, attrName, pageURL))
+	}
 }
 
 // queryAXNodes uses Accessibility.queryAXTree to find nodes by name and/or role.

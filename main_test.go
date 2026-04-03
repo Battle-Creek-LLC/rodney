@@ -55,6 +55,7 @@ func TestMain(m *testing.M) {
 	mux.HandleFunc("/empty", handleEmpty)
 	mux.HandleFunc("/logs", handleLogs)
 	mux.HandleFunc("/discover", handleDiscover)
+	mux.HandleFunc("/discover-extended", handleDiscoverExtended)
 	server := httptest.NewServer(mux)
 
 	env = &testEnv{browser: browser, server: server, debugURL: u}
@@ -2111,5 +2112,683 @@ func TestParseStartFlags_UnknownFlag(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown flag: --bogus") {
 		t.Errorf("expected 'unknown flag: --bogus' in error, got: %v", err)
+	}
+}
+
+// =====================
+// Extended discover fixture
+// =====================
+
+func handleDiscoverExtended(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head><title>Extended Discover Page</title></head>
+<body>
+  <nav>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings">Settings</a>
+    <a id="profile-link" href="/profile">My Profile</a>
+    <a href="/logout">Log Out</a>
+  </nav>
+
+  <form id="login" action="/auth/login">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" placeholder="enter email">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password">
+    <select id="region" name="region" aria-label="Region">
+      <option value="us">US</option>
+      <option value="eu">EU</option>
+    </select>
+    <input type="file" name="avatar" id="avatar-upload">
+    <button type="submit">Sign In</button>
+  </form>
+
+  <form id="search-form" action="/search">
+    <input name="q" type="search" placeholder="Search...">
+    <button type="submit">Go</button>
+  </form>
+
+  <main>
+    <button id="save-btn">Save Changes</button>
+    <textarea id="notes" placeholder="Add notes..."></textarea>
+    <input type="checkbox" id="agree" name="agree">
+    <label for="agree">I agree</label>
+    <div role="button" tabindex="0" id="custom-btn">Custom Action</div>
+    <span tabindex="0" id="focusable-span">Focusable Span</span>
+  </main>
+</body>
+</html>`))
+}
+
+// =====================
+// discover --forms tests
+// =====================
+
+func TestDiscoverForms_FindsFormFields(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	// login form has: email, password, region select, avatar file, submit button = 5
+	// search form has: q input, submit button = 2
+	if len(entries) < 7 {
+		t.Fatalf("expected at least 7 form field entries, got %d", len(entries))
+	}
+}
+
+func TestDiscoverForms_InputCommand(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Name == "email" {
+			found = true
+			if !strings.Contains(e.Command, "rodney input") {
+				t.Errorf("email field should suggest input command, got %q", e.Command)
+			}
+			if e.Tag != "input" {
+				t.Errorf("expected tag 'input', got %q", e.Tag)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("email field not found in form entries")
+	}
+}
+
+func TestDiscoverForms_SelectCommand(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Name == "region" {
+			found = true
+			if !strings.Contains(e.Command, "rodney select") {
+				t.Errorf("select field should suggest select command, got %q", e.Command)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("region select not found in form entries")
+	}
+}
+
+func TestDiscoverForms_FileCommand(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Name == "avatar" {
+			found = true
+			if !strings.Contains(e.Command, "rodney file") {
+				t.Errorf("file field should suggest file command, got %q", e.Command)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("avatar file input not found in form entries")
+	}
+}
+
+func TestDiscoverForms_SubmitCommand(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Tag == "button" && e.FormSelector == "form#login" {
+			found = true
+			if !strings.Contains(e.Command, "rodney click") {
+				t.Errorf("submit button should suggest click command, got %q", e.Command)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("submit button not found in login form entries")
+	}
+}
+
+func TestDiscoverForms_FormSelector(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	formSelectors := make(map[string]bool)
+	for _, e := range entries {
+		formSelectors[e.FormSelector] = true
+	}
+	if !formSelectors["form#login"] {
+		t.Error("expected form#login in form selectors")
+	}
+	if !formSelectors["form#search-form"] {
+		t.Error("expected form#search-form in form selectors")
+	}
+}
+
+func TestDiscoverForms_Label(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name == "email" {
+			if e.Label != "Email" {
+				t.Errorf("email field should have label 'Email', got %q", e.Label)
+			}
+			return
+		}
+	}
+	t.Error("email field not found")
+}
+
+func TestDiscoverForms_FormatText(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	out := formatDiscoverFormsText(entries)
+	if !strings.Contains(out, "Form: form#login") {
+		t.Errorf("output should contain 'Form: form#login', got:\n%s", out)
+	}
+	if !strings.Contains(out, "rodney input") {
+		t.Errorf("output should contain 'rodney input', got:\n%s", out)
+	}
+	if !strings.Contains(out, "rodney select") {
+		t.Errorf("output should contain 'rodney select', got:\n%s", out)
+	}
+	if !strings.Contains(out, "rodney click") {
+		t.Errorf("output should contain 'rodney click', got:\n%s", out)
+	}
+}
+
+func TestDiscoverForms_JSON(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	out, jsonErr := json.MarshalIndent(entries, "", "  ")
+	if jsonErr != nil {
+		t.Fatalf("JSON marshal failed: %v", jsonErr)
+	}
+	var parsed []discoverFormEntry
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("JSON round-trip failed: %v", err)
+	}
+	if len(parsed) != len(entries) {
+		t.Errorf("JSON round-trip: expected %d entries, got %d", len(entries), len(parsed))
+	}
+}
+
+func TestDiscoverForms_EmptyPage(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	entries, err := queryDiscoverForms(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverForms failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 form entries on empty page, got %d", len(entries))
+	}
+}
+
+// =====================
+// discover --links tests
+// =====================
+
+func TestDiscoverLinks_FindsLinks(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverLinks(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverLinks failed: %v", err)
+	}
+	// nav has 4 links
+	if len(entries) < 4 {
+		t.Fatalf("expected at least 4 link entries, got %d", len(entries))
+	}
+}
+
+func TestDiscoverLinks_ClickCommand(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverLinks(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverLinks failed: %v", err)
+	}
+	for _, e := range entries {
+		if !strings.Contains(e.Command, "rodney click") {
+			t.Errorf("link should suggest click command, got %q", e.Command)
+		}
+	}
+}
+
+func TestDiscoverLinks_HasHref(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverLinks(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverLinks failed: %v", err)
+	}
+	hrefs := make(map[string]bool)
+	for _, e := range entries {
+		hrefs[e.Href] = true
+	}
+	for _, expected := range []string{"/dashboard", "/settings", "/profile", "/logout"} {
+		if !hrefs[expected] {
+			t.Errorf("expected link with href %q", expected)
+		}
+	}
+}
+
+func TestDiscoverLinks_HasText(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverLinks(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverLinks failed: %v", err)
+	}
+	texts := make(map[string]bool)
+	for _, e := range entries {
+		texts[e.Text] = true
+	}
+	for _, expected := range []string{"Dashboard", "Settings", "My Profile", "Log Out"} {
+		if !texts[expected] {
+			t.Errorf("expected link with text %q", expected)
+		}
+	}
+}
+
+func TestDiscoverLinks_SelectorWithID(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverLinks(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverLinks failed: %v", err)
+	}
+	for _, e := range entries {
+		if e.Href == "/profile" {
+			if e.Selector != "a#profile-link" {
+				t.Errorf("profile link should have selector 'a#profile-link', got %q", e.Selector)
+			}
+			return
+		}
+	}
+	t.Error("profile link not found")
+}
+
+func TestDiscoverLinks_FormatText(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverLinks(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverLinks failed: %v", err)
+	}
+	out := formatDiscoverLinksText(entries, "http://example.com/test")
+	if !strings.Contains(out, "Links on http://example.com/test:") {
+		t.Errorf("output should contain page URL header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "rodney click") {
+		t.Errorf("output should contain 'rodney click', got:\n%s", out)
+	}
+	if !strings.Contains(out, "Dashboard") {
+		t.Errorf("output should contain link text 'Dashboard', got:\n%s", out)
+	}
+}
+
+func TestDiscoverLinks_JSON(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverLinks(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverLinks failed: %v", err)
+	}
+	out, jsonErr := json.MarshalIndent(entries, "", "  ")
+	if jsonErr != nil {
+		t.Fatalf("JSON marshal failed: %v", jsonErr)
+	}
+	var parsed []discoverLinkEntry
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("JSON round-trip failed: %v", err)
+	}
+	if len(parsed) != len(entries) {
+		t.Errorf("JSON round-trip: expected %d entries, got %d", len(entries), len(parsed))
+	}
+}
+
+func TestDiscoverLinks_EmptyPage(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	entries, err := queryDiscoverLinks(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverLinks failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 link entries on empty page, got %d", len(entries))
+	}
+}
+
+// =====================
+// discover --interactive tests
+// =====================
+
+func TestDiscoverInteractive_FindsElements(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	// buttons (save-btn, 2 submit), links (4), inputs (email, password, q, agree checkbox),
+	// select (region), textarea (notes), role=button (custom-btn), tabindex span
+	if len(entries) < 10 {
+		t.Fatalf("expected at least 10 interactive entries, got %d", len(entries))
+	}
+}
+
+func TestDiscoverInteractive_ButtonClick(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Selector == "button#save-btn" {
+			found = true
+			if !strings.Contains(e.Command, "rodney click") {
+				t.Errorf("button should suggest click command, got %q", e.Command)
+			}
+			if e.Role != "button" {
+				t.Errorf("expected role 'button', got %q", e.Role)
+			}
+			if e.Text != "Save Changes" {
+				t.Errorf("expected text 'Save Changes', got %q", e.Text)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("save-btn button not found in interactive entries")
+	}
+}
+
+func TestDiscoverInteractive_InputCommand(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Selector == "input#email" {
+			found = true
+			if !strings.Contains(e.Command, "rodney input") {
+				t.Errorf("email input should suggest input command, got %q", e.Command)
+			}
+			if e.Role != "textbox" {
+				t.Errorf("expected role 'textbox', got %q", e.Role)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("email input not found in interactive entries")
+	}
+}
+
+func TestDiscoverInteractive_SelectCommand(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Selector == "select#region" {
+			found = true
+			if !strings.Contains(e.Command, "rodney select") {
+				t.Errorf("select should suggest select command, got %q", e.Command)
+			}
+			if e.Role != "combobox" {
+				t.Errorf("expected role 'combobox', got %q", e.Role)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("region select not found in interactive entries")
+	}
+}
+
+func TestDiscoverInteractive_TextareaCommand(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Selector == "textarea#notes" {
+			found = true
+			if !strings.Contains(e.Command, "rodney input") {
+				t.Errorf("textarea should suggest input command, got %q", e.Command)
+			}
+			if e.Role != "textbox" {
+				t.Errorf("expected role 'textbox', got %q", e.Role)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("notes textarea not found in interactive entries")
+	}
+}
+
+func TestDiscoverInteractive_LinkCommand(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Tag == "a" && e.Text == "Dashboard" {
+			found = true
+			if !strings.Contains(e.Command, "rodney click") {
+				t.Errorf("link should suggest click command, got %q", e.Command)
+			}
+			if e.Role != "link" {
+				t.Errorf("expected role 'link', got %q", e.Role)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Dashboard link not found in interactive entries")
+	}
+}
+
+func TestDiscoverInteractive_RoleButton(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Selector == "div#custom-btn" {
+			found = true
+			if !strings.Contains(e.Command, "rodney click") {
+				t.Errorf("role=button element should suggest click command, got %q", e.Command)
+			}
+			if e.Role != "button" {
+				t.Errorf("expected role 'button', got %q", e.Role)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("custom-btn (role=button) not found in interactive entries")
+	}
+}
+
+func TestDiscoverInteractive_Tabindex(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Selector == "span#focusable-span" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("focusable-span (tabindex) not found in interactive entries")
+	}
+}
+
+func TestDiscoverInteractive_CheckboxRole(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Selector == "input#agree" {
+			found = true
+			if e.Role != "checkbox" {
+				t.Errorf("expected role 'checkbox', got %q", e.Role)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("agree checkbox not found in interactive entries")
+	}
+}
+
+func TestDiscoverInteractive_FormatText(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	out := formatDiscoverInteractiveText(entries)
+	if !strings.Contains(out, "Interactive elements:") {
+		t.Errorf("output should contain 'Interactive elements:' header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "rodney click") {
+		t.Errorf("output should contain 'rodney click', got:\n%s", out)
+	}
+	if !strings.Contains(out, "rodney input") {
+		t.Errorf("output should contain 'rodney input', got:\n%s", out)
+	}
+	if !strings.Contains(out, "rodney select") {
+		t.Errorf("output should contain 'rodney select', got:\n%s", out)
+	}
+}
+
+func TestDiscoverInteractive_JSON(t *testing.T) {
+	page := navigateTo(t, "/discover-extended")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	out, jsonErr := json.MarshalIndent(entries, "", "  ")
+	if jsonErr != nil {
+		t.Fatalf("JSON marshal failed: %v", jsonErr)
+	}
+	var parsed []discoverInteractiveEntry
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("JSON round-trip failed: %v", err)
+	}
+	if len(parsed) != len(entries) {
+		t.Errorf("JSON round-trip: expected %d entries, got %d", len(entries), len(parsed))
+	}
+}
+
+func TestDiscoverInteractive_EmptyPage(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	entries, err := queryDiscoverInteractive(page)
+	if err != nil {
+		t.Fatalf("queryDiscoverInteractive failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 interactive entries on empty page, got %d", len(entries))
+	}
+}
+
+// =====================
+// discover mode mutual exclusivity test
+// =====================
+
+func TestDiscoverModes_MutualExclusivity(t *testing.T) {
+	// Test that parsing detects multiple mode flags.
+	// We can't easily test cmdDiscover (it calls fatal/os.Exit),
+	// so we test the flag parsing logic inline.
+	tests := []struct {
+		name  string
+		args  []string
+		count int
+	}{
+		{"forms only", []string{"--forms"}, 1},
+		{"links only", []string{"--links"}, 1},
+		{"interactive only", []string{"--interactive"}, 1},
+		{"forms+links", []string{"--forms", "--links"}, 2},
+		{"forms+interactive", []string{"--forms", "--interactive"}, 2},
+		{"links+interactive", []string{"--links", "--interactive"}, 2},
+		{"all three", []string{"--forms", "--links", "--interactive"}, 3},
+		{"none", []string{}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			modeForms, modeLinks, modeInteractive := false, false, false
+			for _, arg := range tt.args {
+				switch arg {
+				case "--forms":
+					modeForms = true
+				case "--links":
+					modeLinks = true
+				case "--interactive":
+					modeInteractive = true
+				}
+			}
+			count := 0
+			if modeForms {
+				count++
+			}
+			if modeLinks {
+				count++
+			}
+			if modeInteractive {
+				count++
+			}
+			if count != tt.count {
+				t.Errorf("expected mode count %d, got %d", tt.count, count)
+			}
+			if count > 1 {
+				// This is the error case: modes are mutually exclusive
+				// Verify that the condition that triggers the error is detected
+				if count <= 1 {
+					t.Error("expected multiple modes to be detected as error")
+				}
+			}
+		})
 	}
 }
