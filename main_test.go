@@ -1539,6 +1539,82 @@ func TestViewport_ScreenshotSkipsOverrideWhenViewportSet(t *testing.T) {
 	}
 }
 
+// =====================
+// parseStartFlags (flag.FlagSet) tests
+// =====================
+
+func TestParseStartFlags_FlagSet_NoFlags(t *testing.T) {
+	f, err := parseStartFlags([]string{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if f.ignoreCertErrors {
+		t.Error("expected insecure=false with no flags")
+	}
+	if !f.headless {
+		t.Error("expected headless=true with no flags")
+	}
+}
+
+func TestParseStartFlags_FlagSet_ShowFlag(t *testing.T) {
+	f, err := parseStartFlags([]string{"--show"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if f.ignoreCertErrors {
+		t.Error("expected insecure=false")
+	}
+	if f.headless {
+		t.Error("expected headless=false when --show is passed")
+	}
+}
+
+func TestParseStartFlags_FlagSet_InsecureFlag(t *testing.T) {
+	f, err := parseStartFlags([]string{"--insecure"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !f.ignoreCertErrors {
+		t.Error("expected insecure=true when --insecure is passed")
+	}
+	if !f.headless {
+		t.Error("expected headless=true when only --insecure is passed")
+	}
+}
+
+func TestParseStartFlags_FlagSet_InsecureShortFlag(t *testing.T) {
+	f, err := parseStartFlags([]string{"-k"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !f.ignoreCertErrors {
+		t.Error("expected insecure=true when -k is passed")
+	}
+}
+
+func TestParseStartFlags_FlagSet_ShowAndInsecure(t *testing.T) {
+	f, err := parseStartFlags([]string{"--show", "--insecure"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !f.ignoreCertErrors {
+		t.Error("expected insecure=true")
+	}
+	if f.headless {
+		t.Error("expected headless=false when --show is passed")
+	}
+}
+
+func TestParseStartFlags_FlagSet_UnknownFlag(t *testing.T) {
+	_, err := parseStartFlags([]string{"--bogus"})
+	if err == nil {
+		t.Fatal("expected error for unknown flag --bogus")
+	}
+	if !strings.Contains(err.Error(), "--bogus") {
+		t.Errorf("error should mention the unknown flag, got: %v", err)
+	}
+}
+
 func TestInsecureFlag_WithSelfSignedCert(t *testing.T) {
 	// Create HTTPS server with self-signed certificate
 	mux := http.NewServeMux()
