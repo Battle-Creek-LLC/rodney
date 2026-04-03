@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	stdctx "context"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
@@ -176,6 +177,176 @@ func fatal(format string, args ...interface{}) {
 
 func hint(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "hint: "+format+"\n", args...)
+}
+
+// context writes a contextual hint to stderr to help agents self-correct.
+func context(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "context: "+format+"\n", args...)
+}
+
+// inspectFailure runs a single JavaScript snippet on the page to gather context
+// about why an element operation failed. It writes findings as context: lines to
+// stderr. It must not panic or fatal if the inspection itself fails.
+func inspectFailure(page *rod.Page, selector string) {
+	// Budget 200ms for the entire inspection
+	ctx, cancel := stdctx.WithTimeout(stdctx.Background(), 200*time.Millisecond)
+	defer cancel()
+	shortPage := page.Context(ctx)
+
+	jsSnippet := fmt.Sprintf(`() => {
+  var selector = %q;
+  var result = {};
+  result.readyState = document.readyState;
+  result.url = location.href;
+  result.title = document.title;
+
+  // Check if selector matches but is hidden
+  try {
+    var el = document.querySelector(selector);
+    if (el) {
+      var style = getComputedStyle(el);
+      var rect = el.getBoundingClientRect();
+      result.hidden = {
+        display: style.display,
+        visibility: style.visibility,
+        opacity: style.opacity,
+        width: rect.width,
+        height: rect.height
+      };
+    }
+  } catch(e) {}
+
+  // Find similar interactive elements
+  try {
+    var interactive = document.querySelectorAll(
+      'button, a[href], input, select, textarea, [role="button"], [role="link"], [tabindex]'
+    );
+    result.available = Array.from(interactive).slice(0, 20).map(function(el) {
+      return {
+        tag: el.tagName.toLowerCase(),
+        id: el.id || '',
+        classes: el.className || '',
+        text: (el.textContent || '').trim().slice(0, 50),
+        type: el.type || '',
+        name: el.name || ''
+      };
+    });
+  } catch(e) { result.available = []; }
+
+  // Check for overlay at center of viewport
+  try {
+    var cx = window.innerWidth / 2, cy = window.innerHeight / 2;
+    var topEl = document.elementFromPoint(cx, cy);
+    if (topEl) {
+      var tz = getComputedStyle(topEl).zIndex;
+      if (tz !== 'auto' && parseInt(tz) > 100) {
+        result.overlay = {
+          tag: topEl.tagName.toLowerCase(),
+          id: topEl.id || '',
+          classes: topEl.className || '',
+          zIndex: tz
+        };
+      }
+    }
+  } catch(e) {}
+
+  // Check for auth patterns in URL
+  result.authPattern = /login|signin|sign-in|auth|sso|oauth/i.test(location.href) ||
+                       /login|sign.in/i.test(document.title);
+
+  return JSON.stringify(result);
+}`, selector)
+
+	result, err := shortPage.Eval(jsSnippet)
+	if err != nil {
+		return
+	}
+
+	raw := result.Value.Str()
+	if raw == "" {
+		return
+	}
+
+	var data struct {
+		ReadyState  string `json:"readyState"`
+		URL         string `json:"url"`
+		Title       string `json:"title"`
+		AuthPattern bool   `json:"authPattern"`
+		Hidden      *struct {
+			Display    string  `json:"display"`
+			Visibility string  `json:"visibility"`
+			Opacity    string  `json:"opacity"`
+			Width      float64 `json:"width"`
+			Height     float64 `json:"height"`
+		} `json:"hidden"`
+		Available []struct {
+			Tag     string `json:"tag"`
+			ID      string `json:"id"`
+			Classes string `json:"classes"`
+			Text    string `json:"text"`
+			Type    string `json:"type"`
+			Name    string `json:"name"`
+		} `json:"available"`
+		Overlay *struct {
+			Tag     string `json:"tag"`
+			ID      string `json:"id"`
+			Classes string `json:"classes"`
+			ZIndex  string `json:"zIndex"`
+		} `json:"overlay"`
+	}
+
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		return
+	}
+
+	// Hidden element detection
+	if data.Hidden != nil {
+		if data.Hidden.Display == "none" {
+			context("'%s' exists but is hidden (display: none) — try 'rodney wait \"%s\"'", selector, selector)
+		} else if data.Hidden.Visibility == "hidden" {
+			context("'%s' exists but is hidden (visibility: hidden) — try 'rodney wait \"%s\"'", selector, selector)
+		} else if data.Hidden.Opacity == "0" {
+			context("'%s' exists but is hidden (opacity: 0) — try 'rodney wait \"%s\"'", selector, selector)
+		} else if data.Hidden.Width == 0 && data.Hidden.Height == 0 {
+			context("'%s' exists but is hidden (zero dimensions) — try 'rodney wait \"%s\"'", selector, selector)
+		}
+	}
+
+	// Page still loading
+	if data.ReadyState != "complete" {
+		context("page is still loading (readyState: %s) — try 'rodney waitstable'", data.ReadyState)
+	}
+
+	// Auth redirect detection
+	if data.AuthPattern {
+		context("current URL appears to be a login page (%s)", data.URL)
+	}
+
+	// Overlay detection
+	if data.Overlay != nil {
+		overlayDesc := data.Overlay.Tag
+		if data.Overlay.Classes != "" {
+			overlayDesc += "." + strings.SplitN(data.Overlay.Classes, " ", 2)[0]
+		}
+		context("a modal/overlay may be blocking the page (%s, z-index: %s)", overlayDesc, data.Overlay.ZIndex)
+	}
+
+	// Fuzzy matching on available elements
+	if len(data.Available) > 0 {
+		matched := false
+		if strings.HasPrefix(selector, "#") {
+			target := strings.TrimPrefix(selector, "#")
+			for _, el := range data.Available {
+				if el.ID != "" && el.ID != target && strings.Contains(el.ID, target) {
+					context("did you mean '#%s'?", el.ID)
+					matched = true
+				}
+			}
+		}
+		if !matched {
+			context("page has %d interactive elements — try 'rodney discover --interactive'", len(data.Available))
+		}
+	}
 }
 
 func main() {
@@ -962,7 +1133,9 @@ func cmdClick(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(selector)
 	if err != nil {
+		inspectFailure(page, args[0])
 		hint("try 'rodney discover --interactive' to see available elements")
+
 		fatal("element not found: %v", err)
 	}
 	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
@@ -981,7 +1154,9 @@ func cmdInput(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		inspectFailure(page, args[0])
 		hint("try 'rodney discover --interactive' to see available elements")
+
 		fatal("element not found: %v", err)
 	}
 	text := strings.Join(args[1:], " ")
@@ -996,7 +1171,9 @@ func cmdClear(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		inspectFailure(page, args[0])
 		hint("try 'rodney discover --interactive' to see available elements")
+
 		fatal("element not found: %v", err)
 	}
 	el.MustSelectAllText().MustInput("")
@@ -1213,7 +1390,9 @@ func cmdSelect(args []string) {
 	}`, args[0], args[1])
 	result, err := page.Eval(js)
 	if err != nil {
+		inspectFailure(page, args[0])
 		hint("try 'rodney discover --interactive' to see available elements")
+
 		fatal("select failed: %v", err)
 	}
 	fmt.Printf("Selected: %s\n", result.Value.Str())
@@ -1226,7 +1405,9 @@ func cmdSubmit(args []string) {
 	_, _, page := withPage()
 	_, err := page.Element(args[0])
 	if err != nil {
+		inspectFailure(page, args[0])
 		hint("try 'rodney discover --interactive' to see available elements")
+
 		fatal("form not found: %v", err)
 	}
 	page.MustEval(fmt.Sprintf(`() => document.querySelector(%q).submit()`, args[0]))
@@ -1240,7 +1421,9 @@ func cmdHover(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		inspectFailure(page, args[0])
 		hint("try 'rodney discover --interactive' to see available elements")
+
 		fatal("element not found: %v", err)
 	}
 	el.MustHover()
@@ -1254,7 +1437,9 @@ func cmdFocus(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		inspectFailure(page, args[0])
 		hint("try 'rodney discover --interactive' to see available elements")
+
 		fatal("element not found: %v", err)
 	}
 	el.MustFocus()
