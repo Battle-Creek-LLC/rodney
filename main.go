@@ -79,6 +79,15 @@ func resolveStateDir(mode scopeMode, workingDir string) string {
 	}
 }
 
+// CallRecord tracks a single command invocation for repeated-failure detection.
+type CallRecord struct {
+	Cmd      string `json:"cmd"`
+	Selector string `json:"sel,omitempty"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"err,omitempty"`
+	TS       int64  `json:"ts"`
+}
+
 // State persisted between CLI invocations
 type State struct {
 	DebugURL    string `json:"debug_url"`
@@ -97,6 +106,9 @@ type State struct {
 	ViewportHeight int     `json:"viewport_height,omitempty"`
 	ViewportScale  float64 `json:"viewport_scale,omitempty"`
 	ViewportMobile bool    `json:"viewport_mobile,omitempty"`
+
+	// Ring buffer of recent command results for repeated-failure detection
+	RecentCalls []CallRecord `json:"recent_calls,omitempty"`
 }
 
 func stateDir() string {
@@ -347,6 +359,74 @@ func inspectFailure(page *rod.Page, selector string) {
 			context("page has %d interactive elements — try 'rodney discover --interactive'", len(data.Available))
 		}
 	}
+}
+
+// observationCmds lists commands that don't break failure streaks.
+var observationCmds = map[string]bool{
+	"url": true, "title": true, "text": true, "html": true,
+	"screenshot": true, "screenshot-el": true, "exists": true,
+	"visible": true, "count": true, "ax-tree": true, "ax-find": true,
+	"ax-node": true, "discover": true, "pages": true, "status": true,
+	"logs": true, "pdf": true, "attr": true,
+}
+
+// recordCall appends a CallRecord to state and trims to the last 10 entries.
+func recordCall(cmd, selector string, ok bool, errMsg string) {
+	s, err := loadState()
+	if err != nil {
+		return
+	}
+	s.RecentCalls = append(s.RecentCalls, CallRecord{
+		Cmd:      cmd,
+		Selector: selector,
+		OK:       ok,
+		Error:    errMsg,
+		TS:       time.Now().Unix(),
+	})
+	if len(s.RecentCalls) > 10 {
+		s.RecentCalls = s.RecentCalls[len(s.RecentCalls)-10:]
+	}
+	_ = saveState(s)
+}
+
+// checkStuck walks RecentCalls backwards counting consecutive identical failures.
+func checkStuck(cmd, selector string) int {
+	s, err := loadState()
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for i := len(s.RecentCalls) - 1; i >= 0; i-- {
+		r := s.RecentCalls[i]
+		if observationCmds[r.Cmd] {
+			continue
+		}
+		if r.OK {
+			break
+		}
+		if r.Cmd == cmd && r.Selector == selector {
+			count++
+		} else {
+			break
+		}
+	}
+	return count
+}
+
+// reportStuck writes escalating context to stderr based on failure count.
+func reportStuck(count int) {
+	if count <= 1 {
+		return
+	}
+	if count == 2 {
+		context("this command has failed %d times with the same error — try a different selector", count)
+		return
+	}
+	context("STUCK — this command has failed %d times in a row", count)
+	context("stop retrying and try a different approach:")
+	context("  rodney discover --interactive")
+	context("  rodney ax-find --role button")
+	context("  rodney waitstable")
 }
 
 func main() {
@@ -1224,9 +1304,12 @@ func cmdClick(args []string) {
 		fatal("unexpected arguments after selector: %v", remaining)
 	}
 	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		reportStuck(checkStuck("click", selector))
+		recordCall("click", selector, false, fmt.Sprintf("%v", err))
 		hint("element may not be interactive — try 'rodney js \"document.querySelector(\\\"%s\\\").click()\"'", selector)
 		fatal("click failed: %v", err)
 	}
+	recordCall("click", selector, true, "")
 	// Brief pause for click handlers to execute
 	time.Sleep(100 * time.Millisecond)
 	fmt.Println("Clicked")
@@ -1243,6 +1326,7 @@ func cmdInput(args []string) {
 	}
 	text := strings.Join(remaining, " ")
 	el.MustSelectAllText().MustInput(text)
+	recordCall("input", args[0], true, "")
 	fmt.Printf("Typed: %s\n", text)
 }
 
@@ -1256,6 +1340,7 @@ func cmdClear(args []string) {
 		fatal("unexpected arguments after selector: %v", remaining)
 	}
 	el.MustSelectAllText().MustInput("")
+	recordCall("clear", args[0], true, "")
 	fmt.Println("Cleared")
 }
 
@@ -1501,6 +1586,7 @@ func cmdHover(args []string) {
 		fatal("unexpected arguments after selector: %v", remaining)
 	}
 	el.MustHover()
+	recordCall("hover", args[0], true, "")
 	fmt.Println("Hovered")
 }
 
@@ -1514,6 +1600,7 @@ func cmdFocus(args []string) {
 		fatal("unexpected arguments after selector: %v", remaining)
 	}
 	el.MustFocus()
+	recordCall("focus", args[0], true, "")
 	fmt.Println("Focused")
 }
 

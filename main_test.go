@@ -3535,6 +3535,10 @@ func handleOverlay(w http.ResponseWriter, r *http.Request) {
 }
 
 // captureStderr captures everything written to os.Stderr by fn, trimming trailing whitespace.
+// Repeated failure detection tests
+// =====================
+
+// captureStderr captures everything written to os.Stderr by fn.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
@@ -3856,5 +3860,407 @@ func TestResolveElement_LinkByRoleAndName(t *testing.T) {
 	href := el.MustAttribute("href")
 	if href == nil || *href != "/about" {
 		t.Errorf("expected href '/about', got %v", href)
+	}
+}
+
+// =====================
+// repeated failure detection tests
+// =====================
+
+func TestCallRecord_JSONRoundTrip(t *testing.T) {
+	rec := CallRecord{
+		Cmd:      "click",
+		Selector: "#btn",
+		OK:       false,
+		Error:    "element not found",
+		TS:       1712160000,
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var loaded CallRecord
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if loaded.Cmd != rec.Cmd {
+		t.Errorf("Cmd: got %q, want %q", loaded.Cmd, rec.Cmd)
+	}
+	if loaded.Selector != rec.Selector {
+		t.Errorf("Selector: got %q, want %q", loaded.Selector, rec.Selector)
+	}
+	if loaded.OK != rec.OK {
+		t.Errorf("OK: got %v, want %v", loaded.OK, rec.OK)
+	}
+	if loaded.Error != rec.Error {
+		t.Errorf("Error: got %q, want %q", loaded.Error, rec.Error)
+	}
+	if loaded.TS != rec.TS {
+		t.Errorf("TS: got %d, want %d", loaded.TS, rec.TS)
+	}
+}
+
+func TestCallRecord_JSONOmitsEmptySelector(t *testing.T) {
+	rec := CallRecord{Cmd: "click", OK: true, TS: 1}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if strings.Contains(string(data), `"sel"`) {
+		t.Errorf("empty selector should be omitted, got: %s", string(data))
+	}
+}
+
+func TestCallRecord_JSONOmitsEmptyError(t *testing.T) {
+	rec := CallRecord{Cmd: "click", OK: true, TS: 1}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if strings.Contains(string(data), `"err"`) {
+		t.Errorf("empty error should be omitted, got: %s", string(data))
+	}
+}
+
+func TestRecentCalls_StatePersistence(t *testing.T) {
+	state := &State{
+		DebugURL:  "ws://localhost:1234",
+		ChromePID: 12345,
+		DataDir:   t.TempDir(),
+		RecentCalls: []CallRecord{
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 1},
+			{Cmd: "click", Selector: "#btn", OK: true, TS: 2},
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var loaded State
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if len(loaded.RecentCalls) != 2 {
+		t.Fatalf("expected 2 RecentCalls, got %d", len(loaded.RecentCalls))
+	}
+	if loaded.RecentCalls[0].Cmd != "click" {
+		t.Errorf("RecentCalls[0].Cmd: got %q, want %q", loaded.RecentCalls[0].Cmd, "click")
+	}
+}
+
+func TestRecentCalls_OmittedWhenEmpty(t *testing.T) {
+	state := &State{
+		DebugURL:  "ws://localhost:1234",
+		ChromePID: 12345,
+		DataDir:   "/tmp/test",
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if strings.Contains(string(data), "recent_calls") {
+		t.Errorf("empty RecentCalls should be omitted, got: %s", string(data))
+	}
+}
+
+func TestRecordCall_AddsEntries(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldStateDir := activeStateDir
+	activeStateDir = tmpDir
+	t.Cleanup(func() { activeStateDir = oldStateDir })
+
+	// Create initial state
+	if err := saveState(&State{DebugURL: "ws://test", ChromePID: 1, DataDir: tmpDir}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	recordCall("click", "#btn", false, "not found")
+	recordCall("click", "#btn", false, "not found")
+
+	s, err := loadState()
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	if len(s.RecentCalls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(s.RecentCalls))
+	}
+	if s.RecentCalls[0].Cmd != "click" {
+		t.Errorf("expected cmd 'click', got %q", s.RecentCalls[0].Cmd)
+	}
+}
+
+func TestRecordCall_TrimsTo10(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldStateDir := activeStateDir
+	activeStateDir = tmpDir
+	t.Cleanup(func() { activeStateDir = oldStateDir })
+
+	if err := saveState(&State{DebugURL: "ws://test", ChromePID: 1, DataDir: tmpDir}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	for i := 0; i < 15; i++ {
+		recordCall("click", fmt.Sprintf("#btn%d", i), false, "not found")
+	}
+
+	s, err := loadState()
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	if len(s.RecentCalls) != 10 {
+		t.Fatalf("expected 10 calls after trimming, got %d", len(s.RecentCalls))
+	}
+	// First entry should be btn5 (entries 0-4 trimmed away)
+	if s.RecentCalls[0].Selector != "#btn5" {
+		t.Errorf("expected first entry selector '#btn5', got %q", s.RecentCalls[0].Selector)
+	}
+}
+
+func TestCheckStuck_NoHistory(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldStateDir := activeStateDir
+	activeStateDir = tmpDir
+	t.Cleanup(func() { activeStateDir = oldStateDir })
+
+	if err := saveState(&State{DebugURL: "ws://test", ChromePID: 1, DataDir: tmpDir}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	count := checkStuck("click", "#btn")
+	if count != 0 {
+		t.Errorf("expected 0, got %d", count)
+	}
+}
+
+func TestCheckStuck_TwoIdenticalFailures(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldStateDir := activeStateDir
+	activeStateDir = tmpDir
+	t.Cleanup(func() { activeStateDir = oldStateDir })
+
+	if err := saveState(&State{
+		DebugURL:  "ws://test",
+		ChromePID: 1,
+		DataDir:   tmpDir,
+		RecentCalls: []CallRecord{
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 1},
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 2},
+		},
+	}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	count := checkStuck("click", "#btn")
+	if count != 2 {
+		t.Errorf("expected 2, got %d", count)
+	}
+}
+
+func TestCheckStuck_ThreeIdenticalFailures(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldStateDir := activeStateDir
+	activeStateDir = tmpDir
+	t.Cleanup(func() { activeStateDir = oldStateDir })
+
+	if err := saveState(&State{
+		DebugURL:  "ws://test",
+		ChromePID: 1,
+		DataDir:   tmpDir,
+		RecentCalls: []CallRecord{
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 1},
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 2},
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 3},
+		},
+	}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	count := checkStuck("click", "#btn")
+	if count != 3 {
+		t.Errorf("expected 3, got %d", count)
+	}
+}
+
+func TestCheckStuck_ObservationsDontBreakStreak(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldStateDir := activeStateDir
+	activeStateDir = tmpDir
+	t.Cleanup(func() { activeStateDir = oldStateDir })
+
+	if err := saveState(&State{
+		DebugURL:  "ws://test",
+		ChromePID: 1,
+		DataDir:   tmpDir,
+		RecentCalls: []CallRecord{
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 1},
+			{Cmd: "screenshot", OK: true, TS: 2},
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 3},
+			{Cmd: "exists", Selector: "#btn", OK: true, TS: 4},
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 5},
+		},
+	}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	count := checkStuck("click", "#btn")
+	if count != 3 {
+		t.Errorf("expected 3 (observations skipped), got %d", count)
+	}
+}
+
+func TestCheckStuck_SuccessBreaksStreak(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldStateDir := activeStateDir
+	activeStateDir = tmpDir
+	t.Cleanup(func() { activeStateDir = oldStateDir })
+
+	if err := saveState(&State{
+		DebugURL:  "ws://test",
+		ChromePID: 1,
+		DataDir:   tmpDir,
+		RecentCalls: []CallRecord{
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 1},
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 2},
+			{Cmd: "click", Selector: "#other", OK: true, TS: 3},
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 4},
+		},
+	}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	count := checkStuck("click", "#btn")
+	if count != 1 {
+		t.Errorf("expected 1 (success broke streak), got %d", count)
+	}
+}
+
+func TestCheckStuck_DifferentCmdBreaksStreak(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldStateDir := activeStateDir
+	activeStateDir = tmpDir
+	t.Cleanup(func() { activeStateDir = oldStateDir })
+
+	if err := saveState(&State{
+		DebugURL:  "ws://test",
+		ChromePID: 1,
+		DataDir:   tmpDir,
+		RecentCalls: []CallRecord{
+			{Cmd: "hover", Selector: "#btn", OK: false, Error: "not found", TS: 1},
+			{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 2},
+		},
+	}); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	count := checkStuck("click", "#btn")
+	if count != 1 {
+		t.Errorf("expected 1 (different cmd broke streak), got %d", count)
+	}
+}
+
+func TestReportStuck_NoOutput_Count0(t *testing.T) {
+	out := captureStderr(t, func() { reportStuck(0) })
+	if out != "" {
+		t.Errorf("expected no output for count 0, got %q", out)
+	}
+}
+
+func TestReportStuck_NoOutput_Count1(t *testing.T) {
+	out := captureStderr(t, func() { reportStuck(1) })
+	if out != "" {
+		t.Errorf("expected no output for count 1, got %q", out)
+	}
+}
+
+func TestReportStuck_Count2(t *testing.T) {
+	out := captureStderr(t, func() { reportStuck(2) })
+	if !strings.Contains(out, "failed 2 times") {
+		t.Errorf("expected 'failed 2 times' message, got %q", out)
+	}
+	if !strings.Contains(out, "try a different selector") {
+		t.Errorf("expected 'try a different selector' suggestion, got %q", out)
+	}
+}
+
+func TestReportStuck_Count3(t *testing.T) {
+	out := captureStderr(t, func() { reportStuck(3) })
+	if !strings.Contains(out, "STUCK") {
+		t.Errorf("expected 'STUCK' message, got %q", out)
+	}
+	if !strings.Contains(out, "failed 3 times") {
+		t.Errorf("expected 'failed 3 times' message, got %q", out)
+	}
+	if !strings.Contains(out, "discover --interactive") {
+		t.Errorf("expected 'discover --interactive' suggestion, got %q", out)
+	}
+	if !strings.Contains(out, "ax-find") {
+		t.Errorf("expected 'ax-find' suggestion, got %q", out)
+	}
+	if !strings.Contains(out, "waitstable") {
+		t.Errorf("expected 'waitstable' suggestion, got %q", out)
+	}
+}
+
+func TestReportStuck_Count5(t *testing.T) {
+	out := captureStderr(t, func() { reportStuck(5) })
+	if !strings.Contains(out, "STUCK") {
+		t.Errorf("expected 'STUCK' message for count 5, got %q", out)
+	}
+	if !strings.Contains(out, "failed 5 times") {
+		t.Errorf("expected 'failed 5 times' message, got %q", out)
+	}
+}
+
+func TestCheckStuck_AllObservationCmds(t *testing.T) {
+	// Verify all observation commands are properly skipped
+	obsCmds := []string{"url", "title", "text", "html", "screenshot", "screenshot-el",
+		"exists", "visible", "count", "ax-tree", "ax-find", "ax-node",
+		"discover", "pages", "status", "logs", "pdf", "attr"}
+
+	for _, obs := range obsCmds {
+		tmpDir := t.TempDir()
+		oldStateDir := activeStateDir
+		activeStateDir = tmpDir
+
+		if err := saveState(&State{
+			DebugURL:  "ws://test",
+			ChromePID: 1,
+			DataDir:   tmpDir,
+			RecentCalls: []CallRecord{
+				{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 1},
+				{Cmd: obs, OK: true, TS: 2},
+				{Cmd: "click", Selector: "#btn", OK: false, Error: "not found", TS: 3},
+			},
+		}); err != nil {
+			activeStateDir = oldStateDir
+			t.Fatalf("saveState for obs %q: %v", obs, err)
+		}
+
+		count := checkStuck("click", "#btn")
+		if count != 2 {
+			t.Errorf("observation cmd %q should not break streak: expected 2, got %d", obs, count)
+		}
+		activeStateDir = oldStateDir
+	}
+}
+
+func TestStartClearsRecentCalls(t *testing.T) {
+	// When cmdStart creates a fresh State, RecentCalls should be nil/empty
+	state := &State{
+		DebugURL:  "ws://localhost:1234",
+		ChromePID: 12345,
+		DataDir:   t.TempDir(),
+	}
+	if len(state.RecentCalls) != 0 {
+		t.Errorf("fresh State should have no RecentCalls, got %d", len(state.RecentCalls))
+	}
+
+	// Verify it's omitted in JSON
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if strings.Contains(string(data), "recent_calls") {
+		t.Errorf("fresh state JSON should not contain recent_calls, got: %s", string(data))
 	}
 }
