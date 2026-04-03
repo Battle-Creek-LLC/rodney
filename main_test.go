@@ -2113,3 +2113,71 @@ func TestParseStartFlags_UnknownFlag(t *testing.T) {
 		t.Errorf("expected 'unknown flag: --bogus' in error, got: %v", err)
 	}
 }
+
+// =====================
+// hint function tests
+// =====================
+
+// captureStderr captures everything written to os.Stderr by fn, trimming trailing whitespace.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = oldStderr
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("captureStderr read: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestHint_BasicMessage(t *testing.T) {
+	got := captureStderr(t, func() {
+		hint("try 'rodney discover --interactive' to see available elements")
+	})
+	expected := "hint: try 'rodney discover --interactive' to see available elements"
+	if got != expected {
+		t.Errorf("expected %q, got %q", expected, got)
+	}
+}
+
+func TestHint_FormattedMessage(t *testing.T) {
+	got := captureStderr(t, func() {
+		hint("element may not be interactive — try 'rodney js \"document.querySelector(\\\"%s\\\").click()\"'", "#btn")
+	})
+	if !strings.Contains(got, "hint:") {
+		t.Errorf("expected output to start with 'hint:', got %q", got)
+	}
+	if !strings.Contains(got, "#btn") {
+		t.Errorf("expected output to contain selector '#btn', got %q", got)
+	}
+}
+
+func TestHint_WritesToStderr(t *testing.T) {
+	// Verify hint writes to stderr, not stdout
+	stdout := captureStdout(t, func() {
+		hint("this should not appear on stdout")
+	})
+	if stdout != "" {
+		t.Errorf("hint should not write to stdout, got %q", stdout)
+	}
+}
+
+func TestHint_MultipleHints(t *testing.T) {
+	got := captureStderr(t, func() {
+		hint("first hint")
+		hint("second hint")
+	})
+	if !strings.Contains(got, "hint: first hint") {
+		t.Errorf("expected 'hint: first hint' in output, got %q", got)
+	}
+	if !strings.Contains(got, "hint: second hint") {
+		t.Errorf("expected 'hint: second hint' in output, got %q", got)
+	}
+}
