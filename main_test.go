@@ -55,6 +55,9 @@ func TestMain(m *testing.M) {
 	mux.HandleFunc("/empty", handleEmpty)
 	mux.HandleFunc("/logs", handleLogs)
 	mux.HandleFunc("/discover", handleDiscover)
+	mux.HandleFunc("/hidden", handleHidden)
+	mux.HandleFunc("/login", handleLogin)
+	mux.HandleFunc("/overlay", handleOverlay)
 	server := httptest.NewServer(mux)
 
 	env = &testEnv{browser: browser, server: server, debugURL: u}
@@ -2111,5 +2114,153 @@ func TestParseStartFlags_UnknownFlag(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown flag: --bogus") {
 		t.Errorf("expected 'unknown flag: --bogus' in error, got: %v", err)
+	}
+}
+
+// --- Fixtures for inspectFailure tests ---
+
+func handleHidden(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head><title>Hidden Page</title></head>
+<body>
+  <button id="visible-btn">Visible</button>
+  <button id="hidden-btn" style="display:none">Hidden</button>
+  <button id="checkout-btn">Checkout</button>
+</body>
+</html>`))
+}
+
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head><title>Sign In</title></head>
+<body>
+  <input type="text" id="username" placeholder="Username">
+  <input type="password" id="password" placeholder="Password">
+  <button id="login-btn">Sign In</button>
+</body>
+</html>`))
+}
+
+func handleOverlay(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head><title>Overlay Page</title></head>
+<body>
+  <button id="action-btn">Action</button>
+  <div class="modal-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:1000;background:rgba(0,0,0,0.5)">
+    <div class="modal-content">Modal Content</div>
+  </div>
+</body>
+</html>`))
+}
+
+// captureStderr captures everything written to os.Stderr by fn, trimming trailing whitespace.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = oldStderr
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("captureStderr read: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// =====================
+// inspectFailure tests
+// =====================
+
+func TestInspectFailure_HiddenElement(t *testing.T) {
+	page := navigateTo(t, "/hidden")
+	stderr := captureStderr(t, func() {
+		inspectFailure(page, "#hidden-btn")
+	})
+	if !strings.Contains(stderr, "exists but is hidden") {
+		t.Errorf("expected hidden element context, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "display: none") {
+		t.Errorf("expected 'display: none' in context, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "rodney wait") {
+		t.Errorf("expected suggestion to use rodney wait, got:\n%s", stderr)
+	}
+}
+
+func TestInspectFailure_FuzzyMatch(t *testing.T) {
+	page := navigateTo(t, "/hidden")
+	stderr := captureStderr(t, func() {
+		inspectFailure(page, "#checkout")
+	})
+	if !strings.Contains(stderr, "did you mean '#checkout-btn'?") {
+		t.Errorf("expected fuzzy match suggestion for #checkout-btn, got:\n%s", stderr)
+	}
+}
+
+func TestInspectFailure_AuthURL(t *testing.T) {
+	page := navigateTo(t, "/login")
+	stderr := captureStderr(t, func() {
+		inspectFailure(page, "#nonexistent")
+	})
+	if !strings.Contains(stderr, "login page") {
+		t.Errorf("expected auth pattern context, got:\n%s", stderr)
+	}
+}
+
+func TestInspectFailure_OverlayDetection(t *testing.T) {
+	page := navigateTo(t, "/overlay")
+	stderr := captureStderr(t, func() {
+		inspectFailure(page, "#nonexistent")
+	})
+	if !strings.Contains(stderr, "modal/overlay may be blocking") {
+		t.Errorf("expected overlay context, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "z-index") {
+		t.Errorf("expected z-index in overlay context, got:\n%s", stderr)
+	}
+}
+
+func TestInspectFailure_AvailableElements(t *testing.T) {
+	page := navigateTo(t, "/")
+	stderr := captureStderr(t, func() {
+		inspectFailure(page, "#nonexistent-xyz")
+	})
+	if !strings.Contains(stderr, "interactive elements") {
+		t.Errorf("expected interactive elements context, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "rodney discover --interactive") {
+		t.Errorf("expected discover suggestion, got:\n%s", stderr)
+	}
+}
+
+func TestInspectFailure_EmptyPage(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	// Should not panic or crash on a page with no interactive elements
+	stderr := captureStderr(t, func() {
+		inspectFailure(page, "#anything")
+	})
+	// On an empty page, there should be no crash; context may or may not be present
+	_ = stderr
+}
+
+func TestInspectFailure_NoPanic(t *testing.T) {
+	page := navigateTo(t, "/")
+	// Test with various selector types that should not cause panics
+	selectors := []string{"#nonexistent", ".missing-class", "div.nope", "[data-x]", ""}
+	for _, sel := range selectors {
+		captureStderr(t, func() {
+			inspectFailure(page, sel)
+		})
 	}
 }
