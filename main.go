@@ -293,6 +293,8 @@ func main() {
 		cmdAXNode(args)
 	case "discover":
 		cmdDiscover(args)
+	case "check":
+		cmdCheck(args)
 	case "help", "-h", "--help":
 		printUsage()
 		os.Exit(0)
@@ -1812,6 +1814,235 @@ func cmdAssert(args []string) {
 			os.Exit(0)
 		}
 	}
+}
+
+// --- Composable check command ---
+
+type checkItem struct {
+	kind string // "exists", "visible", "text", "count", "assert"
+	arg1 string // selector or JS expression
+	arg2 string // expected value (for text, count, assert equality)
+}
+
+type checkResult struct {
+	Check    string `json:"check"`
+	Selector string `json:"selector,omitempty"`
+	Expr     string `json:"expr,omitempty"`
+	Pass     bool   `json:"pass"`
+	Got      string `json:"got,omitempty"`
+	Expected string `json:"expected,omitempty"`
+}
+
+// parseCheckArgs walks the argument list and builds a slice of checkItems.
+// Returns the checks, whether --json was specified, and any parse error.
+func parseCheckArgs(args []string) ([]checkItem, bool, error) {
+	var checks []checkItem
+	jsonOutput := false
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--json":
+			jsonOutput = true
+			i++
+		case "--exists":
+			i++
+			if i >= len(args) {
+				return nil, false, fmt.Errorf("--exists requires a selector argument")
+			}
+			checks = append(checks, checkItem{kind: "exists", arg1: args[i]})
+			i++
+		case "--visible":
+			i++
+			if i >= len(args) {
+				return nil, false, fmt.Errorf("--visible requires a selector argument")
+			}
+			checks = append(checks, checkItem{kind: "visible", arg1: args[i]})
+			i++
+		case "--text":
+			i++
+			if i+1 >= len(args) {
+				return nil, false, fmt.Errorf("--text requires <selector> <expected> arguments")
+			}
+			checks = append(checks, checkItem{kind: "text", arg1: args[i], arg2: args[i+1]})
+			i += 2
+		case "--count":
+			i++
+			if i+1 >= len(args) {
+				return nil, false, fmt.Errorf("--count requires <selector> <expected> arguments")
+			}
+			checks = append(checks, checkItem{kind: "count", arg1: args[i], arg2: args[i+1]})
+			i += 2
+		case "--assert":
+			i++
+			if i >= len(args) {
+				return nil, false, fmt.Errorf("--assert requires an expression argument")
+			}
+			expr := args[i]
+			i++
+			// Optionally consume next arg as expected value if it doesn't start with "--"
+			expected := ""
+			if i < len(args) && !strings.HasPrefix(args[i], "--") {
+				expected = args[i]
+				i++
+			}
+			checks = append(checks, checkItem{kind: "assert", arg1: expr, arg2: expected})
+		default:
+			return nil, false, fmt.Errorf("unknown flag: %s", args[i])
+		}
+	}
+	return checks, jsonOutput, nil
+}
+
+// runCheck executes a single check against the given page and returns the result.
+func runCheck(page *rod.Page, c checkItem) checkResult {
+	switch c.kind {
+	case "exists":
+		has, _, err := page.Has(c.arg1)
+		if err != nil {
+			return checkResult{Check: "exists", Selector: c.arg1, Pass: false, Got: fmt.Sprintf("error: %v", err)}
+		}
+		return checkResult{Check: "exists", Selector: c.arg1, Pass: has, Got: fmt.Sprintf("%v", has)}
+
+	case "visible":
+		el, err := page.Element(c.arg1)
+		if err != nil {
+			return checkResult{Check: "visible", Selector: c.arg1, Pass: false, Got: "not found"}
+		}
+		vis, err := el.Visible()
+		if err != nil {
+			return checkResult{Check: "visible", Selector: c.arg1, Pass: false, Got: fmt.Sprintf("error: %v", err)}
+		}
+		return checkResult{Check: "visible", Selector: c.arg1, Pass: vis, Got: fmt.Sprintf("%v", vis)}
+
+	case "text":
+		el, err := page.Element(c.arg1)
+		if err != nil {
+			return checkResult{Check: "text", Selector: c.arg1, Pass: false, Expected: c.arg2, Got: "element not found"}
+		}
+		text, err := el.Text()
+		if err != nil {
+			return checkResult{Check: "text", Selector: c.arg1, Pass: false, Expected: c.arg2, Got: fmt.Sprintf("error: %v", err)}
+		}
+		pass := text == c.arg2
+		return checkResult{Check: "text", Selector: c.arg1, Pass: pass, Got: text, Expected: c.arg2}
+
+	case "count":
+		els, err := page.Elements(c.arg1)
+		if err != nil {
+			return checkResult{Check: "count", Selector: c.arg1, Pass: false, Expected: c.arg2, Got: fmt.Sprintf("error: %v", err)}
+		}
+		got := strconv.Itoa(len(els))
+		pass := got == c.arg2
+		return checkResult{Check: "count", Selector: c.arg1, Pass: pass, Got: got, Expected: c.arg2}
+
+	case "assert":
+		js := fmt.Sprintf(`() => { return (%s); }`, c.arg1)
+		result, err := page.Eval(js)
+		if err != nil {
+			return checkResult{Check: "assert", Expr: c.arg1, Pass: false, Got: fmt.Sprintf("error: %v", err), Expected: c.arg2}
+		}
+		v := result.Value
+		raw := v.JSON("", "")
+		var actual string
+		switch {
+		case raw == "null" || raw == "undefined":
+			actual = raw
+		case raw == "true" || raw == "false":
+			actual = raw
+		case len(raw) > 0 && raw[0] == '"':
+			actual = v.Str()
+		case len(raw) > 0 && (raw[0] == '{' || raw[0] == '['):
+			actual = v.JSON("", "  ")
+		default:
+			actual = raw
+		}
+
+		if c.arg2 != "" {
+			// Equality mode
+			pass := actual == c.arg2
+			return checkResult{Check: "assert", Expr: c.arg1, Pass: pass, Got: actual, Expected: c.arg2}
+		}
+		// Truthy mode
+		truthy := true
+		switch raw {
+		case "false", "0", "null", "undefined", `""`:
+			truthy = false
+		}
+		return checkResult{Check: "assert", Expr: c.arg1, Pass: truthy, Got: actual}
+
+	default:
+		return checkResult{Check: c.kind, Pass: false, Got: "unknown check type"}
+	}
+}
+
+// formatCheckLine formats a single check result as a human-readable line.
+func formatCheckLine(r checkResult) string {
+	status := "PASS"
+	if !r.Pass {
+		status = "FAIL"
+	}
+
+	label := r.Check
+	target := r.Selector
+	if target == "" {
+		target = r.Expr
+	}
+
+	line := fmt.Sprintf("%s  %s %s", status, label, target)
+
+	if !r.Pass {
+		if r.Expected != "" {
+			line += fmt.Sprintf(" -- got %q, expected %q", r.Got, r.Expected)
+		} else if r.Check != "exists" && r.Check != "visible" {
+			line += fmt.Sprintf(" -- got %q", r.Got)
+		}
+	} else if r.Expected != "" {
+		line += fmt.Sprintf(" = %s", r.Expected)
+	}
+
+	return line
+}
+
+func cmdCheck(args []string) {
+	checks, jsonOutput, err := parseCheckArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		os.Exit(2)
+	}
+	if len(checks) == 0 {
+		fmt.Fprintln(os.Stderr, "error: no checks specified")
+		os.Exit(2)
+	}
+
+	_, _, page := withPage()
+
+	var results []checkResult
+	for _, c := range checks {
+		results = append(results, runCheck(page, c))
+	}
+
+	passed := 0
+	for _, r := range results {
+		if r.Pass {
+			passed++
+		}
+	}
+
+	if jsonOutput {
+		data, _ := json.MarshalIndent(results, "", "  ")
+		fmt.Println(string(data))
+	} else {
+		for _, r := range results {
+			fmt.Println(formatCheckLine(r))
+		}
+		fmt.Println("----")
+		fmt.Printf("%d/%d passed\n", passed, len(results))
+	}
+
+	if passed < len(results) {
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 // Ignore SIGPIPE for piped output

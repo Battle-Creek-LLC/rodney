@@ -2113,3 +2113,394 @@ func TestParseStartFlags_UnknownFlag(t *testing.T) {
 		t.Errorf("expected 'unknown flag: --bogus' in error, got: %v", err)
 	}
 }
+
+// =====================
+// check command tests
+// =====================
+
+func TestParseCheckArgs_Exists(t *testing.T) {
+	checks, jsonOut, err := parseCheckArgs([]string{"--exists", "h1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if jsonOut {
+		t.Error("expected jsonOut=false")
+	}
+	if len(checks) != 1 {
+		t.Fatalf("expected 1 check, got %d", len(checks))
+	}
+	if checks[0].kind != "exists" || checks[0].arg1 != "h1" {
+		t.Errorf("expected exists/h1, got %s/%s", checks[0].kind, checks[0].arg1)
+	}
+}
+
+func TestParseCheckArgs_TextAndCount(t *testing.T) {
+	checks, _, err := parseCheckArgs([]string{
+		"--text", "h1", "Welcome",
+		"--count", "button", "2",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("expected 2 checks, got %d", len(checks))
+	}
+	if checks[0].kind != "text" || checks[0].arg1 != "h1" || checks[0].arg2 != "Welcome" {
+		t.Errorf("check 0: got %+v", checks[0])
+	}
+	if checks[1].kind != "count" || checks[1].arg1 != "button" || checks[1].arg2 != "2" {
+		t.Errorf("check 1: got %+v", checks[1])
+	}
+}
+
+func TestParseCheckArgs_AssertWithExpected(t *testing.T) {
+	checks, _, err := parseCheckArgs([]string{"--assert", "document.title", "Test Page"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("expected 1 check, got %d", len(checks))
+	}
+	if checks[0].kind != "assert" || checks[0].arg1 != "document.title" || checks[0].arg2 != "Test Page" {
+		t.Errorf("got %+v", checks[0])
+	}
+}
+
+func TestParseCheckArgs_AssertTruthy(t *testing.T) {
+	checks, _, err := parseCheckArgs([]string{"--assert", "document.title", "--exists", "h1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("expected 2 checks, got %d", len(checks))
+	}
+	// The assert should NOT have consumed "--exists" as its expected value
+	if checks[0].kind != "assert" || checks[0].arg1 != "document.title" || checks[0].arg2 != "" {
+		t.Errorf("assert check: got %+v", checks[0])
+	}
+	if checks[1].kind != "exists" || checks[1].arg1 != "h1" {
+		t.Errorf("exists check: got %+v", checks[1])
+	}
+}
+
+func TestParseCheckArgs_JSON(t *testing.T) {
+	checks, jsonOut, err := parseCheckArgs([]string{"--json", "--exists", "h1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !jsonOut {
+		t.Error("expected jsonOut=true")
+	}
+	if len(checks) != 1 {
+		t.Fatalf("expected 1 check, got %d", len(checks))
+	}
+}
+
+func TestParseCheckArgs_Visible(t *testing.T) {
+	checks, _, err := parseCheckArgs([]string{"--visible", ".main"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(checks) != 1 || checks[0].kind != "visible" || checks[0].arg1 != ".main" {
+		t.Errorf("got %+v", checks)
+	}
+}
+
+func TestParseCheckArgs_NoChecks(t *testing.T) {
+	checks, _, err := parseCheckArgs([]string{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(checks) != 0 {
+		t.Errorf("expected 0 checks, got %d", len(checks))
+	}
+}
+
+func TestParseCheckArgs_UnknownFlag(t *testing.T) {
+	_, _, err := parseCheckArgs([]string{"--bogus"})
+	if err == nil {
+		t.Fatal("expected error for unknown flag")
+	}
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("expected 'unknown flag' in error, got: %v", err)
+	}
+}
+
+func TestParseCheckArgs_MissingExistsArg(t *testing.T) {
+	_, _, err := parseCheckArgs([]string{"--exists"})
+	if err == nil {
+		t.Fatal("expected error for missing --exists arg")
+	}
+}
+
+func TestParseCheckArgs_MissingTextArgs(t *testing.T) {
+	_, _, err := parseCheckArgs([]string{"--text", "h1"})
+	if err == nil {
+		t.Fatal("expected error for missing --text expected arg")
+	}
+}
+
+func TestParseCheckArgs_MissingCountArgs(t *testing.T) {
+	_, _, err := parseCheckArgs([]string{"--count", "h1"})
+	if err == nil {
+		t.Fatal("expected error for missing --count expected arg")
+	}
+}
+
+func TestRunCheck_Exists_Pass(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "exists", arg1: "h1"})
+	if !r.Pass {
+		t.Errorf("expected pass for existing element, got %+v", r)
+	}
+	if r.Check != "exists" {
+		t.Errorf("expected check='exists', got %q", r.Check)
+	}
+}
+
+func TestRunCheck_Exists_Fail(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "exists", arg1: ".nonexistent"})
+	if r.Pass {
+		t.Errorf("expected fail for nonexistent element, got %+v", r)
+	}
+}
+
+func TestRunCheck_Visible_Pass(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "visible", arg1: "h1"})
+	if !r.Pass {
+		t.Errorf("expected pass for visible element, got %+v", r)
+	}
+}
+
+func TestRunCheck_Visible_Fail(t *testing.T) {
+	page := navigateTo(t, "/discover")
+	r := runCheck(page, checkItem{kind: "visible", arg1: "[data-testid=\"hidden-el\"]"})
+	if r.Pass {
+		t.Errorf("expected fail for hidden element, got %+v", r)
+	}
+}
+
+func TestRunCheck_Text_Pass(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "text", arg1: "h1", arg2: "Welcome"})
+	if !r.Pass {
+		t.Errorf("expected pass, got %+v", r)
+	}
+	if r.Got != "Welcome" {
+		t.Errorf("expected got='Welcome', got %q", r.Got)
+	}
+}
+
+func TestRunCheck_Text_Fail(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "text", arg1: "h1", arg2: "Goodbye"})
+	if r.Pass {
+		t.Errorf("expected fail, got %+v", r)
+	}
+	if r.Got != "Welcome" {
+		t.Errorf("expected got='Welcome', got %q", r.Got)
+	}
+	if r.Expected != "Goodbye" {
+		t.Errorf("expected expected='Goodbye', got %q", r.Expected)
+	}
+}
+
+func TestRunCheck_Count_Pass(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "count", arg1: "button", arg2: "2"})
+	if !r.Pass {
+		t.Errorf("expected pass, got %+v", r)
+	}
+	if r.Got != "2" {
+		t.Errorf("expected got='2', got %q", r.Got)
+	}
+}
+
+func TestRunCheck_Count_Fail(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "count", arg1: "button", arg2: "5"})
+	if r.Pass {
+		t.Errorf("expected fail, got %+v", r)
+	}
+	if r.Got != "2" {
+		t.Errorf("expected got='2', got %q", r.Got)
+	}
+	if r.Expected != "5" {
+		t.Errorf("expected expected='5', got %q", r.Expected)
+	}
+}
+
+func TestRunCheck_Assert_Truthy_Pass(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "assert", arg1: "document.title"})
+	if !r.Pass {
+		t.Errorf("expected pass for truthy title, got %+v", r)
+	}
+	if r.Got != "Test Page" {
+		t.Errorf("expected got='Test Page', got %q", r.Got)
+	}
+}
+
+func TestRunCheck_Assert_Truthy_Fail(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "assert", arg1: "null"})
+	if r.Pass {
+		t.Errorf("expected fail for null, got %+v", r)
+	}
+}
+
+func TestRunCheck_Assert_Equality_Pass(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "assert", arg1: "document.title", arg2: "Test Page"})
+	if !r.Pass {
+		t.Errorf("expected pass, got %+v", r)
+	}
+}
+
+func TestRunCheck_Assert_Equality_Fail(t *testing.T) {
+	page := navigateTo(t, "/")
+	r := runCheck(page, checkItem{kind: "assert", arg1: "document.title", arg2: "Wrong Title"})
+	if r.Pass {
+		t.Errorf("expected fail, got %+v", r)
+	}
+	if r.Got != "Test Page" {
+		t.Errorf("expected got='Test Page', got %q", r.Got)
+	}
+	if r.Expected != "Wrong Title" {
+		t.Errorf("expected expected='Wrong Title', got %q", r.Expected)
+	}
+}
+
+func TestFormatCheckLine_Pass(t *testing.T) {
+	r := checkResult{Check: "exists", Selector: "h1", Pass: true}
+	line := formatCheckLine(r)
+	if !strings.HasPrefix(line, "PASS") {
+		t.Errorf("expected PASS prefix, got %q", line)
+	}
+	if !strings.Contains(line, "exists") || !strings.Contains(line, "h1") {
+		t.Errorf("expected 'exists' and 'h1' in line, got %q", line)
+	}
+}
+
+func TestFormatCheckLine_Fail_WithExpected(t *testing.T) {
+	r := checkResult{Check: "text", Selector: "h1", Pass: false, Got: "Hello", Expected: "Welcome"}
+	line := formatCheckLine(r)
+	if !strings.HasPrefix(line, "FAIL") {
+		t.Errorf("expected FAIL prefix, got %q", line)
+	}
+	if !strings.Contains(line, `got "Hello"`) || !strings.Contains(line, `expected "Welcome"`) {
+		t.Errorf("expected got/expected in line, got %q", line)
+	}
+}
+
+func TestFormatCheckLine_Pass_WithExpected(t *testing.T) {
+	r := checkResult{Check: "count", Selector: "button", Pass: true, Got: "2", Expected: "2"}
+	line := formatCheckLine(r)
+	if !strings.HasPrefix(line, "PASS") {
+		t.Errorf("expected PASS prefix, got %q", line)
+	}
+	if !strings.Contains(line, "= 2") {
+		t.Errorf("expected '= 2' in line, got %q", line)
+	}
+}
+
+func TestCheck_AllPass_ExitZero(t *testing.T) {
+	page := navigateTo(t, "/")
+	checks := []checkItem{
+		{kind: "exists", arg1: "h1"},
+		{kind: "text", arg1: "h1", arg2: "Welcome"},
+		{kind: "count", arg1: "button", arg2: "2"},
+	}
+	var results []checkResult
+	for _, c := range checks {
+		results = append(results, runCheck(page, c))
+	}
+	passed := 0
+	for _, r := range results {
+		if r.Pass {
+			passed++
+		}
+	}
+	if passed != len(results) {
+		t.Errorf("expected all %d to pass, only %d passed", len(results), passed)
+	}
+}
+
+func TestCheck_SomeFail_NonZeroPassed(t *testing.T) {
+	page := navigateTo(t, "/")
+	checks := []checkItem{
+		{kind: "exists", arg1: "h1"},
+		{kind: "text", arg1: "h1", arg2: "Wrong text"},
+	}
+	var results []checkResult
+	for _, c := range checks {
+		results = append(results, runCheck(page, c))
+	}
+	passed := 0
+	for _, r := range results {
+		if r.Pass {
+			passed++
+		}
+	}
+	if passed != 1 {
+		t.Errorf("expected 1 pass and 1 fail, got %d passed out of %d", passed, len(results))
+	}
+}
+
+func TestCheck_JSONOutput(t *testing.T) {
+	page := navigateTo(t, "/")
+	checks := []checkItem{
+		{kind: "exists", arg1: "h1"},
+		{kind: "text", arg1: "h1", arg2: "Welcome"},
+	}
+	var results []checkResult
+	for _, c := range checks {
+		results = append(results, runCheck(page, c))
+	}
+	data, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		t.Fatalf("JSON marshal failed: %v", err)
+	}
+	var parsed []checkResult
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("JSON unmarshal failed: %v", err)
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("expected 2 results in JSON, got %d", len(parsed))
+	}
+	if !parsed[0].Pass {
+		t.Error("expected first result to pass")
+	}
+	if parsed[0].Check != "exists" {
+		t.Errorf("expected check='exists', got %q", parsed[0].Check)
+	}
+	if !parsed[1].Pass {
+		t.Error("expected second result to pass")
+	}
+	if parsed[1].Check != "text" {
+		t.Errorf("expected check='text', got %q", parsed[1].Check)
+	}
+}
+
+func TestCheck_MultipleTypes(t *testing.T) {
+	page := navigateTo(t, "/")
+	checks := []checkItem{
+		{kind: "exists", arg1: "h1"},
+		{kind: "visible", arg1: "h1"},
+		{kind: "text", arg1: "h1", arg2: "Welcome"},
+		{kind: "count", arg1: "button", arg2: "2"},
+		{kind: "assert", arg1: "document.title", arg2: "Test Page"},
+		{kind: "assert", arg1: "1 + 1 === 2"},
+	}
+	var results []checkResult
+	for _, c := range checks {
+		results = append(results, runCheck(page, c))
+	}
+	for i, r := range results {
+		if !r.Pass {
+			t.Errorf("check %d (%s %s) failed: %+v", i, r.Check, r.Selector+r.Expr, r)
+		}
+	}
+}
