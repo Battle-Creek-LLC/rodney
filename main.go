@@ -78,6 +78,15 @@ func resolveStateDir(mode scopeMode, workingDir string) string {
 	}
 }
 
+// CallRecord tracks a single command invocation for repeated-failure detection.
+type CallRecord struct {
+	Cmd      string `json:"cmd"`
+	Selector string `json:"sel,omitempty"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"err,omitempty"`
+	TS       int64  `json:"ts"`
+}
+
 // State persisted between CLI invocations
 type State struct {
 	DebugURL    string `json:"debug_url"`
@@ -94,6 +103,9 @@ type State struct {
 	ViewportHeight int     `json:"viewport_height,omitempty"`
 	ViewportScale  float64 `json:"viewport_scale,omitempty"`
 	ViewportMobile bool    `json:"viewport_mobile,omitempty"`
+
+	// Ring buffer of recent command results for repeated-failure detection
+	RecentCalls []CallRecord `json:"recent_calls,omitempty"`
 }
 
 func stateDir() string {
@@ -170,6 +182,81 @@ func printUsage() {
 func fatal(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 	os.Exit(2)
+}
+
+func context(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "context: "+format+"\n", args...)
+}
+
+// observationCmds lists commands that don't break failure streaks.
+var observationCmds = map[string]bool{
+	"url": true, "title": true, "text": true, "html": true,
+	"screenshot": true, "screenshot-el": true, "exists": true,
+	"visible": true, "count": true, "ax-tree": true, "ax-find": true,
+	"ax-node": true, "discover": true, "pages": true, "status": true,
+	"logs": true, "pdf": true, "attr": true,
+}
+
+// recordCall appends a CallRecord to state and trims to the last 10 entries.
+// Silently returns on any error.
+func recordCall(cmd, selector string, ok bool, errMsg string) {
+	s, err := loadState()
+	if err != nil {
+		return
+	}
+	s.RecentCalls = append(s.RecentCalls, CallRecord{
+		Cmd:      cmd,
+		Selector: selector,
+		OK:       ok,
+		Error:    errMsg,
+		TS:       time.Now().Unix(),
+	})
+	if len(s.RecentCalls) > 10 {
+		s.RecentCalls = s.RecentCalls[len(s.RecentCalls)-10:]
+	}
+	_ = saveState(s)
+}
+
+// checkStuck walks RecentCalls backwards counting consecutive identical failures
+// (same cmd + same selector + not ok). Observation commands are skipped.
+// A successful non-observation command breaks the streak.
+func checkStuck(cmd, selector string) int {
+	s, err := loadState()
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for i := len(s.RecentCalls) - 1; i >= 0; i-- {
+		r := s.RecentCalls[i]
+		if observationCmds[r.Cmd] {
+			continue // skip observation commands
+		}
+		if r.OK {
+			break // successful non-observation command breaks streak
+		}
+		if r.Cmd == cmd && r.Selector == selector {
+			count++
+		} else {
+			break // different command/selector breaks streak
+		}
+	}
+	return count
+}
+
+// reportStuck writes escalating context to stderr based on the failure count.
+func reportStuck(count int) {
+	switch {
+	case count <= 1:
+		// nothing
+	case count == 2:
+		context("this command has failed %d times with the same error — try a different selector", count)
+	default:
+		context("STUCK — this command has failed %d times in a row", count)
+		context("stop retrying and try a different approach:")
+		context("  rodney discover --interactive")
+		context("  rodney ax-find --role button")
+		context("  rodney waitstable && rodney click \"<selector>\"")
+	}
 }
 
 func main() {
@@ -933,11 +1020,16 @@ func cmdClick(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		reportStuck(checkStuck("click", args[0]))
+		recordCall("click", args[0], false, fmt.Sprintf("%v", err))
 		fatal("element not found: %v", err)
 	}
 	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		reportStuck(checkStuck("click", args[0]))
+		recordCall("click", args[0], false, fmt.Sprintf("%v", err))
 		fatal("click failed: %v", err)
 	}
+	recordCall("click", args[0], true, "")
 	// Brief pause for click handlers to execute
 	time.Sleep(100 * time.Millisecond)
 	fmt.Println("Clicked")
@@ -950,10 +1042,13 @@ func cmdInput(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		reportStuck(checkStuck("input", args[0]))
+		recordCall("input", args[0], false, fmt.Sprintf("%v", err))
 		fatal("element not found: %v", err)
 	}
 	text := strings.Join(args[1:], " ")
 	el.MustSelectAllText().MustInput(text)
+	recordCall("input", args[0], true, "")
 	fmt.Printf("Typed: %s\n", text)
 }
 
@@ -964,9 +1059,12 @@ func cmdClear(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		reportStuck(checkStuck("clear", args[0]))
+		recordCall("clear", args[0], false, fmt.Sprintf("%v", err))
 		fatal("element not found: %v", err)
 	}
 	el.MustSelectAllText().MustInput("")
+	recordCall("clear", args[0], true, "")
 	fmt.Println("Cleared")
 }
 
@@ -1178,8 +1276,11 @@ func cmdSelect(args []string) {
 	}`, args[0], args[1])
 	result, err := page.Eval(js)
 	if err != nil {
+		reportStuck(checkStuck("select", args[0]))
+		recordCall("select", args[0], false, fmt.Sprintf("%v", err))
 		fatal("select failed: %v", err)
 	}
+	recordCall("select", args[0], true, "")
 	fmt.Printf("Selected: %s\n", result.Value.Str())
 }
 
@@ -1190,9 +1291,12 @@ func cmdSubmit(args []string) {
 	_, _, page := withPage()
 	_, err := page.Element(args[0])
 	if err != nil {
+		reportStuck(checkStuck("submit", args[0]))
+		recordCall("submit", args[0], false, fmt.Sprintf("%v", err))
 		fatal("form not found: %v", err)
 	}
 	page.MustEval(fmt.Sprintf(`() => document.querySelector(%q).submit()`, args[0]))
+	recordCall("submit", args[0], true, "")
 	fmt.Println("Submitted")
 }
 
@@ -1203,9 +1307,12 @@ func cmdHover(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		reportStuck(checkStuck("hover", args[0]))
+		recordCall("hover", args[0], false, fmt.Sprintf("%v", err))
 		fatal("element not found: %v", err)
 	}
 	el.MustHover()
+	recordCall("hover", args[0], true, "")
 	fmt.Println("Hovered")
 }
 
@@ -1216,9 +1323,12 @@ func cmdFocus(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		reportStuck(checkStuck("focus", args[0]))
+		recordCall("focus", args[0], false, fmt.Sprintf("%v", err))
 		fatal("element not found: %v", err)
 	}
 	el.MustFocus()
+	recordCall("focus", args[0], true, "")
 	fmt.Println("Focused")
 }
 
@@ -1229,9 +1339,12 @@ func cmdWait(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		reportStuck(checkStuck("wait", args[0]))
+		recordCall("wait", args[0], false, fmt.Sprintf("%v", err))
 		fatal("element not found: %v", err)
 	}
 	el.MustWaitVisible()
+	recordCall("wait", args[0], true, "")
 	fmt.Println("Element visible")
 }
 
