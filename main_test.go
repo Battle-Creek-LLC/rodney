@@ -2113,3 +2113,108 @@ func TestParseStartFlags_UnknownFlag(t *testing.T) {
 		t.Errorf("expected 'unknown flag: --bogus' in error, got: %v", err)
 	}
 }
+
+// =====================
+// stealth mode tests
+// =====================
+
+func TestParseStartFlags_StealthFlag(t *testing.T) {
+	flags, err := parseStartFlags([]string{"--stealth"})
+	if err != nil {
+		t.Fatalf("--stealth should be accepted, got error: %v", err)
+	}
+	if !flags.stealth {
+		t.Error("expected stealth=true when --stealth is passed")
+	}
+}
+
+func TestParseStartFlags_StealthDefault(t *testing.T) {
+	flags, err := parseStartFlags([]string{})
+	if err != nil {
+		t.Fatalf("no args should be accepted, got error: %v", err)
+	}
+	if flags.stealth {
+		t.Error("expected stealth=false by default")
+	}
+}
+
+func TestParseStartFlags_StealthWithShow(t *testing.T) {
+	flags, err := parseStartFlags([]string{"--show", "--stealth"})
+	if err != nil {
+		t.Fatalf("--show --stealth should be accepted, got error: %v", err)
+	}
+	if flags.headless {
+		t.Error("expected headless=false when --show is passed")
+	}
+	if !flags.stealth {
+		t.Error("expected stealth=true when --stealth is passed")
+	}
+}
+
+func TestStealth_StatePersistence(t *testing.T) {
+	state := &State{
+		DebugURL:  "ws://localhost:1234",
+		ChromePID: 12345,
+		DataDir:   t.TempDir(),
+		Stealth:   true,
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var loaded State
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if !loaded.Stealth {
+		t.Error("expected Stealth=true after round-trip")
+	}
+}
+
+func TestStealth_StateOmittedWhenFalse(t *testing.T) {
+	state := &State{
+		DebugURL:  "ws://localhost:1234",
+		ChromePID: 12345,
+		DataDir:   "/tmp/test",
+		Stealth:   false,
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	if strings.Contains(string(data), "stealth") {
+		t.Errorf("expected stealth to be omitted from JSON when false, got: %s", string(data))
+	}
+}
+
+func TestStealth_NavigatorWebdriver(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	// Inject stealth script the same way withPage does
+	_, err := proto.PageAddScriptToEvaluateOnNewDocument{
+		Source: `Object.defineProperty(navigator, 'webdriver', {get: () => false});`,
+	}.Call(page)
+	if err != nil {
+		t.Fatalf("PageAddScriptToEvaluateOnNewDocument failed: %v", err)
+	}
+
+	// Navigate again so the injected script runs before page scripts
+	if err := page.Navigate(env.server.URL + "/"); err != nil {
+		t.Fatalf("navigate failed: %v", err)
+	}
+	page.MustWaitLoad()
+
+	result, err := page.Eval(`() => navigator.webdriver`)
+	if err != nil {
+		t.Fatalf("eval navigator.webdriver failed: %v", err)
+	}
+
+	if result.Value.Bool() != false {
+		t.Errorf("expected navigator.webdriver to be false, got %v", result.Value)
+	}
+}

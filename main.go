@@ -89,6 +89,8 @@ type State struct {
 	Logs        bool   `json:"logs,omitempty"`        // console log capture enabled
 	LoggerPID   int    `json:"logger_pid,omitempty"`  // PID of _logger subprocess
 
+	Stealth bool `json:"stealth,omitempty"` // stealth mode: remove automation fingerprints
+
 	// Viewport overrides (set by "rodney viewport", re-applied on each connection)
 	ViewportWidth  int     `json:"viewport_width,omitempty"`
 	ViewportHeight int     `json:"viewport_height,omitempty"`
@@ -348,6 +350,13 @@ func withPage() (*State, *rod.Browser, *rod.Page) {
 		}
 	}
 
+	// Inject stealth script to hide automation fingerprints
+	if s.Stealth {
+		_, _ = proto.PageAddScriptToEvaluateOnNewDocument{
+			Source: `Object.defineProperty(navigator, 'webdriver', {get: () => false});`,
+		}.Call(page)
+	}
+
 	return s, browser, page
 }
 
@@ -374,6 +383,7 @@ type startFlags struct {
 	ignoreCertErrors bool
 	enableLogs       bool
 	fakeMedia        bool
+	stealth          bool
 	vpWidth          int
 	vpHeight         int
 	vpScale          float64
@@ -393,6 +403,8 @@ func parseStartFlags(args []string) (startFlags, error) {
 			f.enableLogs = true
 		case "--fake-media":
 			f.fakeMedia = true
+		case "--stealth":
+			f.stealth = true
 		case "--mobile":
 			f.vpMobile = true
 		case "--scale":
@@ -424,7 +436,7 @@ func parseStartFlags(args []string) (startFlags, error) {
 			}
 			f.vpWidth, f.vpHeight = w, h
 		default:
-			return f, fmt.Errorf("unknown flag: %s\nusage: rodney start [--show] [--insecure | -k] [--logs] [--fake-media] [--viewport WxH] [--mobile] [--scale N]", args[i])
+			return f, fmt.Errorf("unknown flag: %s\nusage: rodney start [--show] [--insecure | -k] [--logs] [--fake-media] [--stealth] [--viewport WxH] [--mobile] [--scale N]", args[i])
 		}
 	}
 	return f, nil
@@ -438,6 +450,7 @@ func cmdStart(args []string) {
 	ignoreCertErrors := flags.ignoreCertErrors
 	enableLogs := flags.enableLogs
 	fakeMedia := flags.fakeMedia
+	stealth := flags.stealth
 	headless := flags.headless
 	vpWidth, vpHeight := flags.vpWidth, flags.vpHeight
 	vpScale := flags.vpScale
@@ -476,6 +489,11 @@ func cmdStart(args []string) {
 	// (instead of showing a window only after calling "rodney open")
 	if !headless {
 		l = l.Delete("no-startup-window")
+	}
+
+	if stealth {
+		l = l.Set("disable-blink-features", "AutomationControlled")
+		l = l.Delete("enable-automation")
 	}
 
 	if bin := os.Getenv("ROD_CHROME_BIN"); bin != "" {
@@ -554,6 +572,7 @@ func cmdStart(args []string) {
 		ProxyPort:      proxyPort,
 		Logs:           enableLogs,
 		LoggerPID:      loggerPID,
+		Stealth:        stealth,
 		ViewportWidth:  vpWidth,
 		ViewportHeight: vpHeight,
 		ViewportScale:  vpScale,
