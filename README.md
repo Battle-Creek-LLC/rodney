@@ -521,3 +521,13 @@ The tool uses the [rod](https://github.com/go-rod/rod) Go library which communic
 | `--global` | Use global session (`~/.rodney/`) |
 | `--version` | Print version and exit |
 | `--help`, `-h`, `help` | Show help message |
+
+## Comparing with upstream
+
+This fork adds features on top of [simonw/rodney](https://github.com/simonw/rodney). To see how this fork diverges from upstream:
+
+```bash
+./scripts/compare-upstream.sh
+```
+
+The script fetches both remotes, shows commit divergence in each direction, and prints a file-level diff summary. If upstream has commits this fork is missing, it will suggest the merge command.
