@@ -1243,12 +1243,92 @@ func cmdFocus(args []string) {
 	fmt.Println("Focused")
 }
 
+// parseWaitArgs extracts --text <value> and --gone flags from args,
+// returning the selector and option values.
+func parseWaitArgs(args []string) (selector string, textMatch string, gone bool) {
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--text":
+			if i+1 >= len(args) {
+				fatal("--text requires a value")
+			}
+			i++
+			textMatch = args[i]
+		case "--gone":
+			gone = true
+		default:
+			positional = append(positional, args[i])
+		}
+	}
+	if len(positional) != 1 {
+		fatal("usage: rodney wait <selector> [--text <value>] [--gone]")
+	}
+	selector = positional[0]
+	return
+}
+
 func cmdWait(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney wait <selector>")
+		fatal("usage: rodney wait <selector> [--text <value>] [--gone]")
 	}
+
+	selector, textMatch, gone := parseWaitArgs(args)
+
+	if textMatch != "" && gone {
+		fatal("--text and --gone are mutually exclusive")
+	}
+
 	_, _, page := withPage()
-	el, err := page.Element(args[0])
+
+	if gone {
+		// Wait for element to disappear from DOM or become hidden
+		deadline := time.Now().Add(defaultTimeout)
+		for time.Now().Before(deadline) {
+			els, err := page.Elements(selector)
+			if err != nil || len(els) == 0 {
+				fmt.Println("Element gone")
+				return
+			}
+			// Check if all matched elements are hidden
+			allHidden := true
+			for _, el := range els {
+				visible, err := el.Visible()
+				if err == nil && visible {
+					allHidden = false
+					break
+				}
+			}
+			if allHidden {
+				fmt.Println("Element gone")
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		fatal("timeout waiting for element to disappear: %s", selector)
+		return
+	}
+
+	if textMatch != "" {
+		// Wait for element to exist and contain the specified text
+		deadline := time.Now().Add(defaultTimeout)
+		for time.Now().Before(deadline) {
+			el, err := page.Element(selector)
+			if err == nil {
+				text, err := el.Text()
+				if err == nil && strings.Contains(text, textMatch) {
+					fmt.Println("Found")
+					return
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		fatal("timeout waiting for text %q in %s", textMatch, selector)
+		return
+	}
+
+	// Default: wait for element to exist and be visible
+	el, err := page.Element(selector)
 	if err != nil {
 		fatal("element not found: %v", err)
 	}

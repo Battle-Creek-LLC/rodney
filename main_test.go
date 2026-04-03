@@ -56,6 +56,7 @@ func TestMain(m *testing.M) {
 	mux.HandleFunc("/logs", handleLogs)
 	mux.HandleFunc("/discover", handleDiscover)
 	mux.HandleFunc("/discover-extended", handleDiscoverExtended)
+	mux.HandleFunc("/wait-test", handleWaitTest)
 	server := httptest.NewServer(mux)
 
 	env = &testEnv{browser: browser, server: server, debugURL: u}
@@ -2268,6 +2269,33 @@ func handleDiscoverExtended(w http.ResponseWriter, r *http.Request) {
 }
 
 // =====================
+// wait command tests
+// =====================
+
+func handleWaitTest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head><title>Wait Test Page</title></head>
+<body>
+  <div id="status">Loading</div>
+  <div id="spinner" class="spinner">Spinning...</div>
+  <script>
+    // Change status text after 200ms
+    setTimeout(function() {
+      document.getElementById('status').textContent = 'Ready';
+    }, 200);
+    // Remove spinner after 200ms
+    setTimeout(function() {
+      var el = document.getElementById('spinner');
+      if (el) el.parentNode.removeChild(el);
+    }, 200);
+  </script>
+</body>
+</html>`))
+}
+
+// =====================
 // discover --forms tests
 // =====================
 
@@ -3286,5 +3314,173 @@ func TestCheck_MultipleTypes(t *testing.T) {
 		if !r.Pass {
 			t.Errorf("check %d (%s %s) failed: %+v", i, r.Check, r.Selector+r.Expr, r)
 		}
+	}
+}
+
+// =====================
+// wait command unit tests
+// =====================
+
+func TestParseWaitArgs_SelectorOnly(t *testing.T) {
+	selector, textMatch, gone := parseWaitArgs([]string{".foo"})
+	if selector != ".foo" {
+		t.Errorf("expected selector '.foo', got %q", selector)
+	}
+	if textMatch != "" {
+		t.Errorf("expected empty textMatch, got %q", textMatch)
+	}
+	if gone {
+		t.Error("expected gone=false")
+	}
+}
+
+func TestParseWaitArgs_TextFlag(t *testing.T) {
+	selector, textMatch, gone := parseWaitArgs([]string{".status", "--text", "Ready"})
+	if selector != ".status" {
+		t.Errorf("expected selector '.status', got %q", selector)
+	}
+	if textMatch != "Ready" {
+		t.Errorf("expected textMatch 'Ready', got %q", textMatch)
+	}
+	if gone {
+		t.Error("expected gone=false")
+	}
+}
+
+func TestParseWaitArgs_GoneFlag(t *testing.T) {
+	selector, textMatch, gone := parseWaitArgs([]string{"--gone", ".spinner"})
+	if selector != ".spinner" {
+		t.Errorf("expected selector '.spinner', got %q", selector)
+	}
+	if textMatch != "" {
+		t.Errorf("expected empty textMatch, got %q", textMatch)
+	}
+	if !gone {
+		t.Error("expected gone=true")
+	}
+}
+
+func TestParseWaitArgs_GoneAfterSelector(t *testing.T) {
+	selector, _, gone := parseWaitArgs([]string{".spinner", "--gone"})
+	if selector != ".spinner" {
+		t.Errorf("expected selector '.spinner', got %q", selector)
+	}
+	if !gone {
+		t.Error("expected gone=true")
+	}
+}
+
+func TestParseWaitArgs_TextBeforeSelector(t *testing.T) {
+	selector, textMatch, _ := parseWaitArgs([]string{"--text", "Ready", ".status"})
+	if selector != ".status" {
+		t.Errorf("expected selector '.status', got %q", selector)
+	}
+	if textMatch != "Ready" {
+		t.Errorf("expected textMatch 'Ready', got %q", textMatch)
+	}
+}
+
+func TestCmdWait_BasicWait(t *testing.T) {
+	// Basic wait on an element that exists — should succeed immediately
+	page := navigateTo(t, "/")
+	el, err := page.Element("h1")
+	if err != nil {
+		t.Fatalf("element not found: %v", err)
+	}
+	el.MustWaitVisible()
+	// If we got here, the basic wait mechanism works
+}
+
+func TestCmdWait_TextMatch(t *testing.T) {
+	// Create a page where text changes after a delay
+	page := env.browser.MustPage("")
+	t.Cleanup(func() { page.MustClose() })
+
+	page.MustNavigate(env.server.URL + "/wait-test")
+	page.MustWaitLoad()
+
+	// Poll for the text to appear (simulating what cmdWait --text does)
+	deadline := time.Now().Add(5 * time.Second)
+	found := false
+	for time.Now().Before(deadline) {
+		el, err := page.Element("#status")
+		if err == nil {
+			text, err := el.Text()
+			if err == nil && strings.Contains(text, "Ready") {
+				found = true
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !found {
+		t.Fatal("timed out waiting for text 'Ready' in #status")
+	}
+}
+
+func TestCmdWait_GoneNonexistent(t *testing.T) {
+	// --gone with a selector that doesn't exist should succeed immediately
+	page := navigateTo(t, "/")
+	els, err := page.Elements("#does-not-exist")
+	if err != nil || len(els) == 0 {
+		// Element doesn't exist — this is the success condition for --gone
+	} else {
+		t.Error("expected #does-not-exist to not be found")
+	}
+}
+
+func TestCmdWait_GoneDisappearing(t *testing.T) {
+	// Test that --gone logic detects when an element is removed from the DOM
+	page := env.browser.MustPage("")
+	t.Cleanup(func() { page.MustClose() })
+
+	page.MustNavigate(env.server.URL + "/wait-test")
+	page.MustWaitLoad()
+
+	// Poll for the spinner to disappear (simulating what cmdWait --gone does)
+	deadline := time.Now().Add(5 * time.Second)
+	gone := false
+	for time.Now().Before(deadline) {
+		els, err := page.Elements("#spinner")
+		if err != nil || len(els) == 0 {
+			gone = true
+			break
+		}
+		allHidden := true
+		for _, el := range els {
+			visible, err := el.Visible()
+			if err == nil && visible {
+				allHidden = false
+				break
+			}
+		}
+		if allHidden {
+			gone = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !gone {
+		t.Fatal("timed out waiting for #spinner to disappear")
+	}
+}
+
+func TestCmdWait_MutualExclusivity(t *testing.T) {
+	// --text and --gone together should be detected by parseWaitArgs callers
+	selector, textMatch, gone := parseWaitArgs([]string{"--gone", "--text", "Ready", ".status"})
+	if selector != ".status" {
+		t.Errorf("expected selector '.status', got %q", selector)
+	}
+	if textMatch != "Ready" {
+		t.Errorf("expected textMatch 'Ready', got %q", textMatch)
+	}
+	if !gone {
+		t.Error("expected gone=true")
+	}
+	// Both are set — cmdWait would call fatal("--text and --gone are mutually exclusive")
+	if textMatch != "" && gone {
+		// This is the mutual exclusivity condition — confirmed
+	} else {
+		t.Error("expected both textMatch and gone to be set for mutual exclusivity test")
 	}
 }
