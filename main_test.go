@@ -3684,3 +3684,177 @@ func TestInspectFailure_NoPanic(t *testing.T) {
 		})
 	}
 }
+
+// =====================
+// Accessibility selector tests
+// =====================
+
+func TestParseAXFlags_RoleOnly(t *testing.T) {
+	role, name, remaining := parseAXFlags([]string{"--role", "button"})
+	if role != "button" {
+		t.Errorf("expected role 'button', got %q", role)
+	}
+	if name != "" {
+		t.Errorf("expected empty name, got %q", name)
+	}
+	if len(remaining) != 0 {
+		t.Errorf("expected no remaining args, got %v", remaining)
+	}
+}
+
+func TestParseAXFlags_NameOnly(t *testing.T) {
+	role, name, remaining := parseAXFlags([]string{"--name", "Submit"})
+	if role != "" {
+		t.Errorf("expected empty role, got %q", role)
+	}
+	if name != "Submit" {
+		t.Errorf("expected name 'Submit', got %q", name)
+	}
+	if len(remaining) != 0 {
+		t.Errorf("expected no remaining args, got %v", remaining)
+	}
+}
+
+func TestParseAXFlags_RoleAndName(t *testing.T) {
+	role, name, remaining := parseAXFlags([]string{"--role", "button", "--name", "Submit"})
+	if role != "button" {
+		t.Errorf("expected role 'button', got %q", role)
+	}
+	if name != "Submit" {
+		t.Errorf("expected name 'Submit', got %q", name)
+	}
+	if len(remaining) != 0 {
+		t.Errorf("expected no remaining args, got %v", remaining)
+	}
+}
+
+func TestParseAXFlags_CSSSelector(t *testing.T) {
+	role, name, remaining := parseAXFlags([]string{"#submit-btn"})
+	if role != "" {
+		t.Errorf("expected empty role, got %q", role)
+	}
+	if name != "" {
+		t.Errorf("expected empty name, got %q", name)
+	}
+	if len(remaining) != 1 || remaining[0] != "#submit-btn" {
+		t.Errorf("expected remaining [#submit-btn], got %v", remaining)
+	}
+}
+
+func TestParseAXFlags_RoleWithExtraArgs(t *testing.T) {
+	role, name, remaining := parseAXFlags([]string{"--role", "textbox", "--name", "Email", "hello world"})
+	if role != "textbox" {
+		t.Errorf("expected role 'textbox', got %q", role)
+	}
+	if name != "Email" {
+		t.Errorf("expected name 'Email', got %q", name)
+	}
+	if len(remaining) != 1 || remaining[0] != "hello world" {
+		t.Errorf("expected remaining ['hello world'], got %v", remaining)
+	}
+}
+
+func TestResolveElement_ByRole(t *testing.T) {
+	page := navigateTo(t, "/")
+	el, desc, remaining := resolveElement(page, []string{"--role", "button"})
+	if el == nil {
+		t.Fatal("expected element, got nil")
+	}
+	if !strings.Contains(desc, "--role") {
+		t.Errorf("expected desc to contain '--role', got %q", desc)
+	}
+	if len(remaining) != 0 {
+		t.Errorf("expected no remaining args, got %v", remaining)
+	}
+	// Verify it found a button
+	tag, err := el.Eval(`() => this.tagName.toLowerCase()`)
+	if err != nil {
+		t.Fatalf("eval failed: %v", err)
+	}
+	if tag.Value.Str() != "button" {
+		t.Errorf("expected button tag, got %q", tag.Value.Str())
+	}
+}
+
+func TestResolveElement_ByName(t *testing.T) {
+	page := navigateTo(t, "/")
+	el, desc, _ := resolveElement(page, []string{"--name", "Submit"})
+	if el == nil {
+		t.Fatal("expected element, got nil")
+	}
+	if !strings.Contains(desc, "--name") {
+		t.Errorf("expected desc to contain '--name', got %q", desc)
+	}
+	text, err := el.Text()
+	if err != nil {
+		t.Fatalf("text failed: %v", err)
+	}
+	if text != "Submit" {
+		t.Errorf("expected text 'Submit', got %q", text)
+	}
+}
+
+func TestResolveElement_ByRoleAndName(t *testing.T) {
+	page := navigateTo(t, "/")
+	el, _, _ := resolveElement(page, []string{"--role", "button", "--name", "Submit"})
+	if el == nil {
+		t.Fatal("expected element, got nil")
+	}
+	text, err := el.Text()
+	if err != nil {
+		t.Fatalf("text failed: %v", err)
+	}
+	if text != "Submit" {
+		t.Errorf("expected text 'Submit', got %q", text)
+	}
+}
+
+func TestResolveElement_ByCSSSelector(t *testing.T) {
+	page := navigateTo(t, "/")
+	el, desc, remaining := resolveElement(page, []string{"#submit-btn"})
+	if el == nil {
+		t.Fatal("expected element, got nil")
+	}
+	if desc != "#submit-btn" {
+		t.Errorf("expected desc '#submit-btn', got %q", desc)
+	}
+	if len(remaining) != 0 {
+		t.Errorf("expected no remaining args, got %v", remaining)
+	}
+}
+
+func TestResolveElement_InputWithExtraArgs(t *testing.T) {
+	page := navigateTo(t, "/form")
+	el, _, remaining := resolveElement(page, []string{"--role", "textbox", "--name", "Name", "hello"})
+	if el == nil {
+		t.Fatal("expected element, got nil")
+	}
+	if len(remaining) != 1 || remaining[0] != "hello" {
+		t.Errorf("expected remaining ['hello'], got %v", remaining)
+	}
+}
+
+func TestResolveElement_FormPageByRole(t *testing.T) {
+	page := navigateTo(t, "/form")
+	// Should find a textbox on the form page
+	el, _, _ := resolveElement(page, []string{"--role", "textbox"})
+	if el == nil {
+		t.Fatal("expected element, got nil")
+	}
+	tag, _ := el.Eval(`() => this.tagName.toLowerCase()`)
+	if tag.Value.Str() != "input" {
+		t.Errorf("expected input tag, got %q", tag.Value.Str())
+	}
+}
+
+func TestResolveElement_LinkByRoleAndName(t *testing.T) {
+	page := navigateTo(t, "/")
+	el, _, _ := resolveElement(page, []string{"--role", "link", "--name", "About"})
+	if el == nil {
+		t.Fatal("expected element, got nil")
+	}
+	href := el.MustAttribute("href")
+	if href == nil || *href != "/about" {
+		t.Errorf("expected href '/about', got %v", href)
+	}
+}

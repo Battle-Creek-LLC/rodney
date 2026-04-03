@@ -1125,18 +1125,103 @@ func cmdJS(args []string) {
 	}
 }
 
+// parseAXFlags scans args for --role and --name flags, removes them, and returns
+// the remaining args along with the extracted role and name values.
+func parseAXFlags(args []string) (role, name string, remaining []string) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--role":
+			i++
+			if i < len(args) {
+				role = args[i]
+			}
+		case "--name":
+			i++
+			if i < len(args) {
+				name = args[i]
+			}
+		default:
+			remaining = append(remaining, args[i])
+		}
+	}
+	return
+}
+
+// resolveElement parses args for either a positional CSS selector OR --role/--name
+// flags, finds the element on the page, and returns: the element, a human-readable
+// selector description (for error messages), and the remaining (non-selector) args.
+//
+// When --role/--name flags are present, the first remaining arg is NOT consumed as
+// a CSS selector; all remaining args are returned as-is for the caller to use.
+// When no --role/--name flags are present, the first remaining arg is consumed as
+// the CSS selector, and subsequent remaining args are returned.
+//
+// It calls fatal() if both a CSS selector and --role/--name are provided, or if no
+// element is found.
+func resolveElement(page *rod.Page, args []string) (*rod.Element, string, []string) {
+	role, name, remaining := parseAXFlags(args)
+	hasAX := role != "" || name != ""
+
+	if !hasAX {
+		// CSS selector mode: first remaining arg is the selector
+		if len(remaining) == 0 {
+			fatal("must provide either a CSS selector or --role/--name flags")
+		}
+		selector := remaining[0]
+		el, err := page.Element(selector)
+		if err != nil {
+			inspectFailure(page, selector)
+			hint("try 'rodney discover --interactive' to see available elements")
+			fatal("element not found: %v", err)
+		}
+		return el, selector, remaining[1:]
+	}
+
+	// Accessibility selector path — remaining args are passed through to the caller
+	desc := ""
+	if role != "" && name != "" {
+		desc = fmt.Sprintf("--role %s --name %q", role, name)
+	} else if role != "" {
+		desc = fmt.Sprintf("--role %s", role)
+	} else {
+		desc = fmt.Sprintf("--name %q", name)
+	}
+
+	nodes, err := queryAXNodes(page, name, role)
+	if err != nil {
+		fatal("accessibility query failed: %v", err)
+	}
+	if len(nodes) == 0 {
+		inspectFailure(page, desc)
+		hint("try 'rodney ax-tree' to see all available accessibility nodes")
+		fatal("no element found matching %s", desc)
+	}
+
+	node := nodes[0]
+	if node.BackendDOMNodeID == 0 {
+		fatal("matched accessibility node has no DOM backing for %s", desc)
+	}
+
+	result, err := proto.DOMResolveNode{BackendNodeID: node.BackendDOMNodeID}.Call(page)
+	if err != nil {
+		fatal("failed to resolve DOM node for %s: %v", desc, err)
+	}
+	el, err := page.ElementFromObject(result.Object)
+	if err != nil {
+		fatal("failed to create element from object for %s: %v", desc, err)
+	}
+	return el, desc, remaining
+}
+
 func cmdClick(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney click <selector>")
+		fatal("usage: rodney click <selector> | --role <role> [--name <name>]")
 	}
 	selector := args[0]
 	_, _, page := withPage()
-	el, err := page.Element(selector)
-	if err != nil {
-		inspectFailure(page, args[0])
-		hint("try 'rodney discover --interactive' to see available elements")
-
-		fatal("element not found: %v", err)
+	el, _, remaining := resolveElement(page, args)
+	if len(remaining) > 0 {
+		fatal("unexpected arguments after selector: %v", remaining)
 	}
 	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		hint("element may not be interactive — try 'rodney js \"document.querySelector(\\\"%s\\\").click()\"'", selector)
@@ -1149,32 +1234,26 @@ func cmdClick(args []string) {
 
 func cmdInput(args []string) {
 	if len(args) < 2 {
-		fatal("usage: rodney input <selector> <text>")
+		fatal("usage: rodney input <selector> <text> | --role <role> [--name <name>] <text>")
 	}
 	_, _, page := withPage()
-	el, err := page.Element(args[0])
-	if err != nil {
-		inspectFailure(page, args[0])
-		hint("try 'rodney discover --interactive' to see available elements")
-
-		fatal("element not found: %v", err)
+	el, _, remaining := resolveElement(page, args)
+	if len(remaining) == 0 {
+		fatal("usage: rodney input <selector> <text> | --role <role> [--name <name>] <text>")
 	}
-	text := strings.Join(args[1:], " ")
+	text := strings.Join(remaining, " ")
 	el.MustSelectAllText().MustInput(text)
 	fmt.Printf("Typed: %s\n", text)
 }
 
 func cmdClear(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney clear <selector>")
+		fatal("usage: rodney clear <selector> | --role <role> [--name <name>]")
 	}
 	_, _, page := withPage()
-	el, err := page.Element(args[0])
-	if err != nil {
-		inspectFailure(page, args[0])
-		hint("try 'rodney discover --interactive' to see available elements")
-
-		fatal("element not found: %v", err)
+	el, _, remaining := resolveElement(page, args)
+	if len(remaining) > 0 {
+		fatal("unexpected arguments after selector: %v", remaining)
 	}
 	el.MustSelectAllText().MustInput("")
 	fmt.Println("Cleared")
@@ -1377,18 +1456,16 @@ func mimeToExt(mime string) string {
 
 func cmdSelect(args []string) {
 	if len(args) < 2 {
-		fatal("usage: rodney select <selector> <value>")
+		fatal("usage: rodney select <selector> <value> | --role <role> [--name <name>] <value>")
 	}
 	_, _, page := withPage()
-	// Use JavaScript to set the value, as rod's Select matches by text
-	js := fmt.Sprintf(`() => {
-		const el = document.querySelector(%q);
-		if (!el) throw new Error('element not found');
-		el.value = %q;
-		el.dispatchEvent(new Event('change', {bubbles: true}));
-		return el.value;
-	}`, args[0], args[1])
-	result, err := page.Eval(js)
+	el, _, remaining := resolveElement(page, args)
+	if len(remaining) == 0 {
+		fatal("usage: rodney select <selector> <value> | --role <role> [--name <name>] <value>")
+	}
+	value := remaining[0]
+	// Use JavaScript on the resolved element to set value and dispatch change event
+	result, err := el.Eval(`(val) => { this.value = val; this.dispatchEvent(new Event('change', {bubbles: true})); return this.value; }`, value)
 	if err != nil {
 		inspectFailure(page, args[0])
 		hint("try 'rodney discover --interactive' to see available elements")
@@ -1400,31 +1477,28 @@ func cmdSelect(args []string) {
 
 func cmdSubmit(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney submit <selector>")
+		fatal("usage: rodney submit <selector> | --role <role> [--name <name>]")
 	}
 	_, _, page := withPage()
-	_, err := page.Element(args[0])
-	if err != nil {
-		inspectFailure(page, args[0])
-		hint("try 'rodney discover --interactive' to see available elements")
-
-		fatal("form not found: %v", err)
+	el, _, remaining := resolveElement(page, args)
+	if len(remaining) > 0 {
+		fatal("unexpected arguments after selector: %v", remaining)
 	}
-	page.MustEval(fmt.Sprintf(`() => document.querySelector(%q).submit()`, args[0]))
+	_, err := el.Eval(`() => { this.submit(); }`)
+	if err != nil {
+		fatal("submit failed: %v", err)
+	}
 	fmt.Println("Submitted")
 }
 
 func cmdHover(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney hover <selector>")
+		fatal("usage: rodney hover <selector> | --role <role> [--name <name>]")
 	}
 	_, _, page := withPage()
-	el, err := page.Element(args[0])
-	if err != nil {
-		inspectFailure(page, args[0])
-		hint("try 'rodney discover --interactive' to see available elements")
-
-		fatal("element not found: %v", err)
+	el, _, remaining := resolveElement(page, args)
+	if len(remaining) > 0 {
+		fatal("unexpected arguments after selector: %v", remaining)
 	}
 	el.MustHover()
 	fmt.Println("Hovered")
@@ -1432,15 +1506,12 @@ func cmdHover(args []string) {
 
 func cmdFocus(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney focus <selector>")
+		fatal("usage: rodney focus <selector> | --role <role> [--name <name>]")
 	}
 	_, _, page := withPage()
-	el, err := page.Element(args[0])
-	if err != nil {
-		inspectFailure(page, args[0])
-		hint("try 'rodney discover --interactive' to see available elements")
-
-		fatal("element not found: %v", err)
+	el, _, remaining := resolveElement(page, args)
+	if len(remaining) > 0 {
+		fatal("unexpected arguments after selector: %v", remaining)
 	}
 	el.MustFocus()
 	fmt.Println("Focused")
@@ -1473,7 +1544,7 @@ func parseWaitArgs(args []string) (selector string, textMatch string, gone bool)
 
 func cmdWait(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney wait <selector> [--text <value>] [--gone]")
+		fatal("usage: rodney wait <selector> [--text <value>] [--gone] | --role <role> [--name <name>]")
 	}
 
 	selector, textMatch, gone := parseWaitArgs(args)
@@ -1493,7 +1564,6 @@ func cmdWait(args []string) {
 				fmt.Println("Element gone")
 				return
 			}
-			// Check if all matched elements are hidden
 			allHidden := true
 			for _, el := range els {
 				visible, err := el.Visible()
@@ -1526,19 +1596,15 @@ func cmdWait(args []string) {
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
+		hint("page may still be loading — try 'rodney waitstable' before this command")
 		fatal("timeout waiting for text %q in %s", textMatch, selector)
 		return
 	}
 
-	// Default: wait for element to exist and be visible
-	el, err := page.Element(selector)
-	if err != nil {
-		hint("page may still be loading — try 'rodney waitstable' before this command")
-		hint("try 'rodney discover --interactive' to see available elements")
-		fatal("element not found: %v", err)
-	}
+	// Default: wait for element to exist and be visible (supports --role/--name)
+	el, _, _ := resolveElement(page, args)
 	el.MustWaitVisible()
-	fmt.Println("Element visible")
+	fmt.Println("Found")
 }
 
 func cmdWaitLoad(args []string) {
@@ -1924,19 +1990,42 @@ func cmdClosePage(args []string) {
 
 func cmdExists(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney exists <selector>")
+		fatal("usage: rodney exists <selector> | --role <role> [--name <name>]")
 	}
 	_, _, page := withPage()
-	has, _, err := page.Has(args[0])
-	if err != nil {
-		fatal("query failed: %v", err)
+
+	role, name, remaining := parseAXFlags(args)
+	hasAX := role != "" || name != ""
+	hasCSS := len(remaining) > 0
+
+	if hasAX && hasCSS {
+		fatal("cannot use both a CSS selector and --role/--name flags")
 	}
-	if has {
-		fmt.Println("true")
-		os.Exit(0)
+
+	if hasAX {
+		nodes, err := queryAXNodes(page, name, role)
+		if err != nil {
+			fatal("query failed: %v", err)
+		}
+		if len(nodes) > 0 {
+			fmt.Println("true")
+			os.Exit(0)
+		} else {
+			fmt.Println("false")
+			os.Exit(1)
+		}
 	} else {
-		fmt.Println("false")
-		os.Exit(1)
+		has, _, err := page.Has(remaining[0])
+		if err != nil {
+			fatal("query failed: %v", err)
+		}
+		if has {
+			fmt.Println("true")
+			os.Exit(0)
+		} else {
+			fmt.Println("false")
+			os.Exit(1)
+		}
 	}
 }
 
@@ -1954,14 +2043,49 @@ func cmdCount(args []string) {
 
 func cmdVisible(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney visible <selector>")
+		fatal("usage: rodney visible <selector> | --role <role> [--name <name>]")
 	}
 	_, _, page := withPage()
-	el, err := page.Element(args[0])
-	if err != nil {
-		fmt.Println("false")
-		os.Exit(1)
+
+	role, name, remaining := parseAXFlags(args)
+	hasAX := role != "" || name != ""
+	hasCSS := len(remaining) > 0
+
+	if hasAX && hasCSS {
+		fatal("cannot use both a CSS selector and --role/--name flags")
 	}
+
+	var el *rod.Element
+	if hasAX {
+		nodes, err := queryAXNodes(page, name, role)
+		if err != nil || len(nodes) == 0 {
+			fmt.Println("false")
+			os.Exit(1)
+		}
+		node := nodes[0]
+		if node.BackendDOMNodeID == 0 {
+			fmt.Println("false")
+			os.Exit(1)
+		}
+		result, err := proto.DOMResolveNode{BackendNodeID: node.BackendDOMNodeID}.Call(page)
+		if err != nil {
+			fmt.Println("false")
+			os.Exit(1)
+		}
+		el, err = page.ElementFromObject(result.Object)
+		if err != nil {
+			fmt.Println("false")
+			os.Exit(1)
+		}
+	} else {
+		var err error
+		el, err = page.Element(remaining[0])
+		if err != nil {
+			fmt.Println("false")
+			os.Exit(1)
+		}
+	}
+
 	visible, err := el.Visible()
 	if err != nil {
 		fmt.Println("false")
