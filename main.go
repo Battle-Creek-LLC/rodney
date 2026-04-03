@@ -174,6 +174,10 @@ func fatal(format string, args ...interface{}) {
 	os.Exit(2)
 }
 
+func hint(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "hint: "+format+"\n", args...)
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -825,6 +829,7 @@ func cmdHTML(args []string) {
 	if len(args) > 0 {
 		el, err := page.Element(args[0])
 		if err != nil {
+			hint("try 'rodney discover --interactive' to see available elements")
 			fatal("element not found: %v", err)
 		}
 		html, err := el.HTML()
@@ -845,6 +850,7 @@ func cmdText(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 	text, err := el.Text()
@@ -861,6 +867,7 @@ func cmdAttr(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 	val := el.MustAttribute(args[1])
@@ -951,12 +958,15 @@ func cmdClick(args []string) {
 	if len(args) < 1 {
 		fatal("usage: rodney click <selector>")
 	}
+	selector := args[0]
 	_, _, page := withPage()
-	el, err := page.Element(args[0])
+	el, err := page.Element(selector)
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		hint("element may not be interactive — try 'rodney js \"document.querySelector(\\\"%s\\\").click()\"'", selector)
 		fatal("click failed: %v", err)
 	}
 	// Brief pause for click handlers to execute
@@ -971,6 +981,7 @@ func cmdInput(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 	text := strings.Join(args[1:], " ")
@@ -985,6 +996,7 @@ func cmdClear(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 	el.MustSelectAllText().MustInput("")
@@ -1001,6 +1013,7 @@ func cmdFile(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(selector)
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 
@@ -1045,6 +1058,7 @@ func cmdDownload(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(selector)
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 
@@ -1199,6 +1213,7 @@ func cmdSelect(args []string) {
 	}`, args[0], args[1])
 	result, err := page.Eval(js)
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("select failed: %v", err)
 	}
 	fmt.Printf("Selected: %s\n", result.Value.Str())
@@ -1211,6 +1226,7 @@ func cmdSubmit(args []string) {
 	_, _, page := withPage()
 	_, err := page.Element(args[0])
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("form not found: %v", err)
 	}
 	page.MustEval(fmt.Sprintf(`() => document.querySelector(%q).submit()`, args[0]))
@@ -1224,6 +1240,7 @@ func cmdHover(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 	el.MustHover()
@@ -1237,6 +1254,7 @@ func cmdFocus(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 	el.MustFocus()
@@ -1330,6 +1348,8 @@ func cmdWait(args []string) {
 	// Default: wait for element to exist and be visible
 	el, err := page.Element(selector)
 	if err != nil {
+		hint("page may still be loading — try 'rodney waitstable' before this command")
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 	el.MustWaitVisible()
@@ -1552,6 +1572,7 @@ func cmdScreenshotEl(args []string) {
 	_, _, page := withPage()
 	el, err := page.Element(args[0])
 	if err != nil {
+		hint("try 'rodney discover --interactive' to see available elements")
 		fatal("element not found: %v", err)
 	}
 	data, err := el.Screenshot(proto.PageCaptureScreenshotFormatPng, 0)
@@ -2505,6 +2526,7 @@ func cmdAXFind(args []string) {
 	}
 
 	if len(nodes) == 0 {
+		hint("try broader criteria — 'rodney ax-tree' shows all available nodes")
 		fmt.Fprintln(os.Stderr, "No matching nodes")
 		os.Exit(1)
 	}
