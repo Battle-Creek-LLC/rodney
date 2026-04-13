@@ -1,8 +1,10 @@
 rodney - Chrome automation from the command line
 
 Browser lifecycle:
-  rodney start [--show] [--insecure | -k] [--logs] [--fake-media] [--viewport WxH] [--mobile] [--scale N]
+  rodney start [--show] [--insecure | -k] [--logs] [--fake-media] [--stealth]
+               [--single-process auto|on|off] [--viewport WxH] [--mobile] [--scale N]
                                 Launch Chrome (headless by default, --show for visible)
+                                --single-process defaults to "auto" (on under gVisor, off elsewhere)
   rodney connect <host:port>      Connect to existing Chrome on remote debug port
   rodney stop                     Shut down Chrome
   rodney status                   Show browser status

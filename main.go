@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -190,6 +191,24 @@ func fatal(format string, args ...interface{}) {
 
 func hint(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "hint: "+format+"\n", args...)
+}
+
+// isGVisor reports whether the current process is running under gVisor.
+// Chrome's multi-process compositor hangs under gVisor's seccomp+ptrace
+// syscall interception, so screenshots require --single-process there.
+// Detection reads /proc/version, which gVisor populates with a signature
+// like "Linux version 4.4.0 ... #1 SMP Sun Jan 10 15:06:54 PST 2016".
+// The reliable marker is the kernel release string "gvisor" shown by
+// uname -a under runsc. Returns false on non-Linux.
+func isGVisor() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	data, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(data)), "gvisor")
 }
 
 // context writes a contextual hint to stderr to help agents self-correct.
@@ -659,6 +678,7 @@ type startFlags struct {
 	enableLogs       bool
 	fakeMedia        bool
 	stealth          bool
+	singleProcess    string // "auto" (default), "on", "off"
 	vpWidth          int
 	vpHeight         int
 	vpScale          float64
@@ -692,12 +712,21 @@ func parseStartFlags(args []string) (startFlags, error) {
 	stealth := fs.Bool("stealth", false, "")
 	mobile := fs.Bool("mobile", false, "")
 	scale := fs.Float64("scale", 0, "")
+	singleProcess := fs.String("single-process", "auto", "")
+
+	usage := "usage: rodney start [--show] [--insecure | -k] [--logs] [--fake-media] [--stealth] [--single-process auto|on|off] [--viewport WxH] [--mobile] [--scale N]"
 
 	if err := fs.Parse(filtered); err != nil {
-		return startFlags{}, fmt.Errorf("unknown flag: %s\nusage: rodney start [--show] [--insecure | -k] [--logs] [--fake-media] [--stealth] [--viewport WxH] [--mobile] [--scale N]", findUnknownFlag(filtered, fs))
+		return startFlags{}, fmt.Errorf("unknown flag: %s\n%s", findUnknownFlag(filtered, fs), usage)
 	}
 	if fs.NArg() > 0 {
-		return startFlags{}, fmt.Errorf("unknown flag: %s\nusage: rodney start [--show] [--insecure | -k] [--logs] [--fake-media] [--stealth] [--viewport WxH] [--mobile] [--scale N]", fs.Arg(0))
+		return startFlags{}, fmt.Errorf("unknown flag: %s\n%s", fs.Arg(0), usage)
+	}
+
+	switch *singleProcess {
+	case "auto", "on", "off":
+	default:
+		return startFlags{}, fmt.Errorf("invalid --single-process value %q (expected auto, on, or off)", *singleProcess)
 	}
 
 	f := startFlags{
@@ -706,6 +735,7 @@ func parseStartFlags(args []string) (startFlags, error) {
 		enableLogs:       *logs,
 		fakeMedia:        *fakeMedia,
 		stealth:          *stealth,
+		singleProcess:    *singleProcess,
 		vpMobile:         *mobile,
 		vpScale:          *scale,
 	}
@@ -767,10 +797,25 @@ func cmdStart(args []string) {
 	l := launcher.New().
 		Set("no-sandbox").
 		Set("disable-gpu").
-		Set("single-process"). // Required for screenshots in gVisor/container environments
-		Leakless(false).        // Keep Chrome alive after CLI exits
+		Leakless(false). // Keep Chrome alive after CLI exits
 		UserDataDir(dataDir).
 		Headless(headless)
+
+	// --single-process is required for screenshots under gVisor (its seccomp
+	// shim breaks Chrome's multi-process compositor) but causes frequent
+	// crashes on desktop. Auto-detect gVisor; allow explicit override.
+	useSingleProcess := false
+	switch flags.singleProcess {
+	case "on":
+		useSingleProcess = true
+	case "off":
+		useSingleProcess = false
+	default: // "auto"
+		useSingleProcess = isGVisor()
+	}
+	if useSingleProcess {
+		l = l.Set("single-process")
+	}
 
 	// When in non-headless mode, make sure that we show the startup window immediately
 	// (instead of showing a window only after calling "rodney open")
@@ -785,8 +830,14 @@ func cmdStart(args []string) {
 
 	if bin := os.Getenv("ROD_CHROME_BIN"); bin != "" {
 		l = l.Bin(bin)
-	} else if found, ok := launcher.LookPath(); ok {
-		l = l.Bin(found)
+	} else if runtime.GOOS != "darwin" {
+		// On macOS, Google Chrome.app enforces single-instance per bundle, so
+		// launching it while the user's regular Chrome is running causes the
+		// new process to be absorbed and exit. Prefer go-rod's auto-downloaded
+		// Chromium there. On other platforms, reuse system Chrome/Chromium.
+		if found, ok := launcher.LookPath(); ok {
+			l = l.Bin(found)
+		}
 	}
 
 	// Detect authenticated proxy and launch helper if needed
