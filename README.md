@@ -1,37 +1,24 @@
 # Rodney: Chrome automation from the command line
 
-[![PyPI](https://img.shields.io/pypi/v/rodney.svg)](https://pypi.org/project/rodney/)
-[![Changelog](https://img.shields.io/github/v/release/simonw/rodney?include_prereleases&label=changelog)](https://github.com/simonw/rodney/releases)
-[![Tests](https://github.com/simonw/rodney/actions/workflows/test.yml/badge.svg)](https://github.com/simonw/rodney/actions/workflows/test.yml)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/simonw/rodney/blob/main/LICENSE)
+[![Changelog](https://img.shields.io/github/v/release/Battle-Creek-LLC/rodney?include_prereleases&label=changelog)](https://github.com/Battle-Creek-LLC/rodney/releases)
+[![Tests](https://github.com/Battle-Creek-LLC/rodney/actions/workflows/test.yml/badge.svg)](https://github.com/Battle-Creek-LLC/rodney/actions/workflows/test.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/Battle-Creek-LLC/rodney/blob/main/LICENSE)
 
 A Go CLI tool that drives a persistent headless Chrome instance using the [rod](https://github.com/go-rod/rod) browser automation library. Each command connects to the same long-running Chrome process, making it easy to script multi-step browser interactions from shell scripts or interactive use.
 
+This is the Battle-Creek-LLC fork of [simonw/rodney](https://github.com/simonw/rodney).
+
 ## Installation
 
-This Go tool can be installed directly [from PyPI](https://pypi.org/project/rodney/) using `pip` or `uv`.
-
-You can run it without installing it first using `uvx`:
-
+Install the Go binary directly:
 ```bash
-uvx rodney --help
+go install github.com/battle-creek-llc/rodney@latest
 ```
-Or install it like this, then run `rodney --help`:
+Or run it without installation:
 ```bash
-uv tool install rodney
-# or
-pip install rodney
+go run github.com/battle-creek-llc/rodney@latest --help
 ```
-
-You can also install the Go binary directly:
-```bash
-go install github.com/simonw/rodney@latest
-```
-Or run it without installation like this:
-```bash
-go run github.com/simonw/rodney@latest --help
-```
-Compiled binaries are available [on the releases page](https://github.com/simonw/rodney/releases). On macOS you may need to [follow these extra steps](https://support.apple.com/en-us/102445) to use those.
+Compiled binaries are available [on the releases page](https://github.com/Battle-Creek-LLC/rodney/releases). On macOS you may need to [follow these extra steps](https://support.apple.com/en-us/102445) to use those.
 
 ## Building
 
