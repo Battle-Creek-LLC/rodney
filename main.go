@@ -855,6 +855,7 @@ func cmdStart(args []string) {
 
 		// Launch ourselves as the proxy helper in the background
 		exe, _ := os.Executable()
+		// nosemgrep: go.lang.security.audit.dangerous-exec-command -- exe is os.Executable() (our own binary); no shell, args are a literal subcommand, a locally-bound port, and operator HTTP(S)_PROXY config — not attacker input.
 		cmd := exec.Command(exe, "_proxy",
 			strconv.Itoa(proxyPort), server, authHeader)
 		setSysProcAttr(cmd)
@@ -893,6 +894,7 @@ func cmdStart(args []string) {
 		logsDir := filepath.Join(stateDir(), "logs")
 		os.MkdirAll(logsDir, 0755)
 		exe, _ := os.Executable()
+		// nosemgrep: go.lang.security.audit.dangerous-exec-command -- exe is os.Executable() (our own binary); no shell, args are a literal subcommand, the locally-generated DevTools URL, and our own state dir — not attacker input.
 		cmd := exec.Command(exe, "_logger", debugURL, logsDir)
 		setSysProcAttr(cmd)
 		if err := cmd.Start(); err != nil {
